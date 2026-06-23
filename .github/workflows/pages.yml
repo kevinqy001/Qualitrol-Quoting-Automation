@@ -34,7 +34,7 @@ jobs:
         with:
           path: docs
 
-  deploy:
+  deploy-project-pages:
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -43,3 +43,28 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  deploy-user-homepage:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install openpyxl python-docx pypdf fastapi jinja2 python-multipart
+
+      - name: Build static site
+        run: python scripts/build_github_pages.py
+
+      - name: Publish to kevinqy001.github.io
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          personal_token: ${{ secrets.GH_PAGES_TOKEN }}
+          external_repository: kevinqy001/kevinqy001.github.io
+          publish_branch: main
+          publish_dir: docs
+          commit_message: Deploy Qualitrol Quoting Automation webapp demo

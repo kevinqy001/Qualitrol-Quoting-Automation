@@ -3,7 +3,7 @@
     "connected": true,
     "endpoint": "https://mock.salesforce.com/api/cases",
     "mode": "mock",
-    "lastSyncAt": "2026-06-23T05:37:42.087306Z",
+    "lastSyncAt": "2026-06-23T05:43:09.839377Z",
     "case": {
       "caseId": "SF-DEMO",
       "subject": "Qualitrol monitoring quotation",
@@ -28,5 +28,5 @@
       }
     ]
   },
-  "checkedAt": "2026-06-23T05:37:42.087320Z"
+  "checkedAt": "2026-06-23T05:43:09.839404Z"
 }

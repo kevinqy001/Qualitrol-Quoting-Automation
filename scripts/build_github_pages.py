@@ -97,10 +97,10 @@ def build() -> Path:
     extraction, preview = _load_sample_payloads()
 
     if DOCS_DIR.exists():
-        shutil.rmtree(DOCS_DIR)
-    DOCS_DIR.mkdir(parents=True)
+        shutil.rmtree(DOCS_DIR, ignore_errors=True)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-    (DOCS_DIR / "static").mkdir()
+    (DOCS_DIR / "static").mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / "webapp" / "static" / "app.js", DOCS_DIR / "static" / "app.js")
 
     data_dir = DOCS_DIR / "data"
