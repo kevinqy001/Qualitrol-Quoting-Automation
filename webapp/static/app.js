@@ -499,7 +499,7 @@
       $("#runtime-copy").textContent = IS_STATIC
         ? "This hosted demo loads sample project 00796547. Run python app.py locally to upload documents and execute the full pipeline."
         : llmConfigured
-          ? `Requests will call ${data.llm.provider || "the configured Foundry provider"} using deployment ${data.llm.deploymentName || "not set"}.`
+          ? ""
           : "No AI endpoint/key is configured yet, so uploads use deterministic local extraction for the POC harness.";
       $("#supported-types").innerHTML = Object.keys(data.supportedFileTypes || {})
         .map((ext) => `<span class="badge bg-brand-100 text-brand-700">${ext}</span>`)

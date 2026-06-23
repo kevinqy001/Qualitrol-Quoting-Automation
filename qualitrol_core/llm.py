@@ -66,6 +66,28 @@ class NullLLMClient:
     def complete_json(self, system: str, user: str, *, max_tokens: int | None = None):
         return None
 
+    def complete_with_image(
+        self,
+        system: str,
+        text: str,
+        image_b64: str,
+        media_type: str = "image/png",
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
+        return ""
+
+    def complete_json_with_image(
+        self,
+        system: str,
+        text: str,
+        image_b64: str,
+        media_type: str = "image/png",
+        *,
+        max_tokens: int | None = None,
+    ):
+        return None
+
 
 class AnthropicFoundryClient:
     """Claude (Opus 4.8) via Azure AI Foundry's Anthropic-compatible endpoint."""
@@ -125,6 +147,71 @@ class AnthropicFoundryClient:
 
     def complete_json(self, system: str, user: str, *, max_tokens: int | None = None):
         return _extract_json(self.complete(system, user, max_tokens=max_tokens))
+
+    def complete_with_image(
+        self,
+        system: str,
+        text: str,
+        image_b64: str,
+        media_type: str = "image/png",
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Send a text prompt together with a base64-encoded image (vision call)."""
+        if not self.available:
+            return ""
+        try:
+            kwargs: dict = {
+                "model": self.deployment,
+                "system": system,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": text},
+                        ],
+                    }
+                ],
+                "max_tokens": max_tokens or self.max_tokens,
+            }
+            if self.temperature is not None:
+                kwargs["temperature"] = self.temperature
+            try:
+                message = self._client.messages.create(**kwargs)
+            except Exception:
+                kwargs.pop("temperature", None)
+                message = self._client.messages.create(**kwargs)
+            parts = [
+                block.text
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            ]
+            return "".join(parts).strip()
+        except Exception:  # pragma: no cover - network / API errors
+            return ""
+
+    def complete_json_with_image(
+        self,
+        system: str,
+        text: str,
+        image_b64: str,
+        media_type: str = "image/png",
+        *,
+        max_tokens: int | None = None,
+    ):
+        return _extract_json(
+            self.complete_with_image(
+                system, text, image_b64, media_type, max_tokens=max_tokens
+            )
+        )
 
 
 _client: Optional[LLMClient] = None

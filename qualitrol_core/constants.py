@@ -32,6 +32,8 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "generator_count": ["Generator"],
     "motor_count": ["Motor"],
     "sensor_count": ["Sensor", "PD Sensor"],
+    "bushing_count": ["Bushing"],
+    "accessory_count": ["Accessory", "Sensor"],
     "pcc_count": ["PCC", "Bus", "Feeder"],
     "measurement_point_count": ["Bus", "PCC", "Measurement Point"],
     "channel_count": ["Channel"],

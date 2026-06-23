@@ -14,6 +14,11 @@ python-multipart>=0.0.18
 # rules-only without it; install to enable AI scenario refinement & explanations.
 anthropic>=0.86
 
+# Optional VLM / SLD image rendering layer. Install to enable Claude Vision-based
+# SLD asset extraction (drawing_assets._extract_from_sld_vlm). The pipeline falls
+# back to text-layer extraction when PyMuPDF is not installed.
+pymupdf>=1.24
+
 # Optional web-research layer for Step 0 (Tavily). Used to discover Qualitrol
 # product models / parameters; not needed to run Step 1 / Step 2.
 tavily-python>=0.5

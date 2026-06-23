@@ -561,7 +561,7 @@ def run(
             llm_used = True
             detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
 
-    drawing_assets = extract_drawing_assets(docs, project_id)
+    drawing_assets = extract_drawing_assets(docs, project_id, llm_client=client)
     requirements = extract_requirements(
         docs, evidence, detected, drawing_assets, dp, project_id
     )

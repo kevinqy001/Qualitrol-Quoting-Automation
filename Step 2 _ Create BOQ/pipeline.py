@@ -45,14 +45,92 @@ def _load_step1(step1_path: Path) -> dict:
     return data
 
 
+# Asset statuses that should be excluded from BOQ quantity calculations by
+# default.  They are preserved in drawing_asset_list for engineer review, and
+# a MissingInfoQuestion is raised when all counted assets are in these states.
+_EXCLUDED_SCOPE_STATUSES = {"Future", "Provision"}
+
+
 def _asset_counts(drawing_assets: list[dict]) -> dict[str, float]:
+    """Aggregate in-scope drawing asset quantities by asset_type.
+
+    Assets whose ``status`` field is "Future" or "Provision" are excluded from
+    the count (they remain in ``drawing_asset_list`` for review).  Assets with
+    ``status`` "Unclear" are included conservatively – a missing-info question
+    is generated separately to prompt engineer confirmation.
+    """
     counts: dict[str, float] = {}
     for asset in drawing_assets:
+        status = asset.get("status", "Unclear")
+        if status in _EXCLUDED_SCOPE_STATUSES:
+            continue
         qty = asset.get("quantity") or 0
         if qty:
             atype = asset.get("asset_type", "")
             counts[atype] = max(counts.get(atype, 0.0), float(qty))
     return counts
+
+
+def _future_scope_questions(
+    drawing_assets: list[dict],
+    asset_counts: dict[str, float],
+    dp: DataPackage,
+    project_id: str,
+) -> list[MissingInfoQuestion]:
+    """Generate Medium-priority questions when Future/Provision assets were excluded.
+
+    For each asset type that has Future/Provision records but produced no
+    in-scope count (i.e. it would be a quantity gap), ask the engineer to
+    confirm whether those assets should be included.
+    """
+    questions: list[MissingInfoQuestion] = []
+    seen_types: set[str] = set()
+
+    for asset in drawing_assets:
+        status = asset.get("status", "Unclear")
+        if status not in _EXCLUDED_SCOPE_STATUSES:
+            continue
+        atype = asset.get("asset_type", "")
+        if not atype or atype in seen_types:
+            continue
+        # Only raise a question when this asset type is NOT already covered by
+        # in-scope assets (i.e. it was the only source for this type).
+        if atype in asset_counts:
+            continue
+        seen_types.add(atype)
+
+        # Find which product families rely on this asset type.
+        families = []
+        for fam in dp.families.values():
+            if fam.primary_asset_type and atype.lower() in fam.primary_asset_type.lower():
+                families.append(fam.family_name)
+
+        fam_str = ", ".join(families[:3]) if families else "Qualitrol products"
+        questions.append(
+            MissingInfoQuestion(
+                project_id=project_id,
+                scenario_id="",
+                missing_item=f"Scope confirmation: {atype} (shown as Future/Provision)",
+                why_it_matters=(
+                    f"{atype} assets were identified in the SLD but marked as Future or "
+                    f"Provision scope. They have been excluded from BOQ quantity. "
+                    f"Relevant product families: {fam_str}."
+                ),
+                question=(
+                    f"The SLD shows {atype} asset(s) as Future or Provision scope. "
+                    "Should these be included in the current BOQ? "
+                    "If yes, please confirm the in-scope quantity."
+                ),
+                priority="Medium",
+                owner="Sales / Customer",
+                status="Open",
+                notes=(
+                    f"Auto-generated: {atype} assets exist in drawing_asset_list "
+                    f"with status {_EXCLUDED_SCOPE_STATUSES}; excluded from _asset_counts."
+                ),
+            )
+        )
+    return questions
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +592,14 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     missing = generate_missing_info(
         detected, requirements, compat_flags, quantity_gaps, dp, project_id
     )
+    # Add questions for Future/Provision assets that were excluded from counting.
+    future_qs = _future_scope_questions(drawing_assets, asset_counts, dp, project_id)
+    seen_mi = {(q.scenario_id, q.missing_item.lower()) for q in missing}
+    for fq in future_qs:
+        key = (fq.scenario_id, fq.missing_item.lower())
+        if key not in seen_mi:
+            seen_mi.add(key)
+            missing.append(fq)
 
     # --- LLM augmentation: suggest any additional clarification questions ---
     if client.available and matches:

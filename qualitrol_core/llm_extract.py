@@ -9,6 +9,7 @@ explanations. Every function:
 
 Used by:
   Step 1 -> refine_scenarios(), extract_requirements()
+  Step 1 -> extract_sld_assets_vlm()  (optional VLM path for SLD drawings)
   Step 2 -> explain_matches(), suggest_missing_info()
 """
 
@@ -18,6 +19,7 @@ import json
 from typing import Optional
 
 from .document_parser import ParsedDocument
+from .schemas import DrawingAsset
 
 _VALID_REQ_TYPES = {"Must-have", "Preferred", "Reference", "Quantity Basis", "Unknown"}
 
@@ -336,4 +338,113 @@ def suggest_missing_info(client, project_summary: dict,
             "priority": prio,
             "owner": str(item.get("owner", "")).strip() or "Sales / Application Engineer",
         })
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
+# Step 1 - SLD asset extraction via Claude Vision (optional VLM path)
+# --------------------------------------------------------------------------- #
+
+_VALID_ASSET_TYPES = {
+    "Circuit Breaker", "Transformer", "GIS Bay", "Bus", "Feeder", "PCC",
+    "Generator", "Motor", "Switchgear Panel", "PD Sensor", "Sensor",
+    "Bushing", "Channel", "Measurement Point",
+}
+_VALID_STATUS = {"New", "Existing", "Future", "Provision", "Unclear"}
+
+
+def extract_sld_assets_vlm(
+    client,
+    image_b64: str,
+    drawing_id: str,
+    project_id: str,
+) -> Optional[list[DrawingAsset]]:
+    """Analyse a base64-encoded SLD page image with Claude Vision.
+
+    Returns a list of ``DrawingAsset`` objects or ``None`` when the LLM is
+    unavailable or the response cannot be parsed. Fails safe: any error
+    returns ``None`` so the text-layer extraction is used as fallback.
+
+    The asset types produced are aligned to the ``COUNT_FIELD_TO_ASSET_TYPE``
+    values in ``constants.py`` so that Step 2 quantity rules can consume them.
+    """
+    if not client.available:
+        return None
+
+    system = (
+        "You are a senior power-systems engineer analysing a Single Line Diagram (SLD) "
+        "for a Qualitrol monitoring quotation. Your task is to produce a structured asset "
+        "list — NOT a BOQ. Extract the individual electrical assets visible in the drawing "
+        "so that quantity rules can calculate BOQ quantities from the asset list.\n\n"
+        "ASSET TYPES to identify (use these exact strings):\n"
+        "  Circuit Breaker, Transformer, GIS Bay, Bus, Feeder, PCC, Generator, Motor,\n"
+        "  Switchgear Panel, PD Sensor, Sensor, Bushing, Channel, Measurement Point\n\n"
+        "STATUS values (use these exact strings):\n"
+        "  New        – in current project scope\n"
+        "  Existing   – already installed, in scope for retrofit/monitoring\n"
+        "  Future     – shown on drawing but not in current contract scope\n"
+        "  Provision  – space/connection reserved only, not supplied now\n"
+        "  Unclear    – cannot determine from drawing\n\n"
+        "SCOPE HINTS:\n"
+        "  Greyed-out, dashed, or hatched areas are typically Future or Provision.\n"
+        "  Solid-line equipment with no qualifier is typically New or Existing.\n"
+        "  Look for text labels: FUTURE, FOR FUTURE, PROVISION, EXISTING, NEW.\n\n"
+        "For each asset provide: asset_tag (text label on drawing, e.g. '40CB7'), "
+        "asset_type (from list above), voltage_level (e.g. '400 kV'), "
+        "drawing_area (zone label, e.g. '400kV GIS Indoor'), "
+        "status (from list above), quantity (integer, default 1), "
+        "evidence (short description of what you see on the drawing).\n\n"
+        "Respond with STRICT JSON only."
+    )
+    user = (
+        "Please analyse this Single Line Diagram and extract all identifiable electrical "
+        "assets. Pay close attention to:\n"
+        "1. Circuit breaker tags (e.g. 40CB7, 43CB4)\n"
+        "2. Transformer labels (e.g. SST-1, SST-2, TR-1)\n"
+        "3. Bus labels (e.g. BUS-1, BUS-2)\n"
+        "4. Feeder / bay labels (e.g. H01, H02, F01)\n"
+        "5. GIS sections and their bay count\n"
+        "6. Any areas shown as Future, Provision, or greyed out\n\n"
+        'Return JSON: {"assets":[{"asset_tag":"...","asset_type":"...","voltage_level":"...",'
+        '"drawing_area":"...","status":"...","quantity":1,"evidence":"..."}]}'
+    )
+
+    data = client.complete_json_with_image(system, user, image_b64, max_tokens=4096)
+    if not isinstance(data, dict) or "assets" not in data:
+        return None
+
+    out: list[DrawingAsset] = []
+    for item in data.get("assets", []):
+        atype = str(item.get("asset_type", "")).strip()
+        if atype not in _VALID_ASSET_TYPES:
+            continue
+        status = str(item.get("status", "Unclear")).strip().title()
+        if status not in _VALID_STATUS:
+            status = "Unclear"
+        try:
+            qty = float(item.get("quantity", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1.0
+        tag = str(item.get("asset_tag", "")).strip()
+        vl = str(item.get("voltage_level", "")).strip()
+        area = str(item.get("drawing_area", "")).strip()
+        evidence = str(item.get("evidence", "")).strip()
+        out.append(
+            DrawingAsset(
+                project_id=project_id,
+                drawing_id=drawing_id,
+                asset_tag=tag,
+                asset_type=atype,
+                voltage_level=vl,
+                quantity=qty,
+                source_location=f"{drawing_id} (VLM vision extraction)",
+                confidence=0.7,
+                drawing_area=area,
+                status=status,
+                notes=(
+                    f"Identified by Claude Vision from SLD image. Evidence: {evidence}. "
+                    "Confirm scope and quantity with engineering before use in BOQ."
+                ),
+            )
+        )
     return out or None

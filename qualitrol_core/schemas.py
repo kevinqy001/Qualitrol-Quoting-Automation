@@ -202,6 +202,10 @@ class DrawingAsset:
     source_location: str = ""
     confidence: float = 0.0
     notes: str = ""
+    # Scope / drawing-zone fields (populated by enhanced SLD extraction)
+    drawing_area: str = ""       # e.g. "400kV GIS" / "33kV GIS" / "LVAC" / "Future Area"
+    status: str = "Unclear"      # "New" / "Existing" / "Future" / "Provision" / "Unclear"
+    scope_confirmed: bool = False  # set True after engineer review
 
 
 # --------------------------------------------------------------------------- #
