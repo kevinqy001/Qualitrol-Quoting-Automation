@@ -1,0 +1,160 @@
+{
+  "boqId": "BOQ-00796547",
+  "caseReference": "00796547",
+  "extractionSummary": "Generate Missing Info Questions (human clarification first). BOQ lines: 1 (draft-ready=0, needs-review=1). 4 clarification question(s) for customer review.",
+  "extractionMode": "llm",
+  "itemCount": 1,
+  "features": {
+    "dga_monitor": false,
+    "temperature_monitor": false,
+    "bushing_monitor": false,
+    "fiber_optic": false,
+    "iec61850": false,
+    "modbus_tcp": false,
+    "dnp3": false
+  },
+  "requirements": [
+    {
+      "category": "GIS partial discharge monitoring",
+      "productCode": "GIS_PD_001",
+      "requirement": "GIS Bay Count = 12 count",
+      "unit": "count",
+      "technicalParams": {
+        "type": "Quantity Basis",
+        "asset": "Gas-insulated switchgear / GIS bay"
+      },
+      "confidence": 0.55,
+      "evidence": "...SURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POINT)-PARTIAL DISCHARGE SENSOR-PDXX.YYFOR MONITORING, SEPERATE SENSOR-LCC CONTENT LIMIT/IEC DESI..."
+    },
+    {
+      "category": "GIS partial discharge monitoring",
+      "productCode": "GIS_PD_001",
+      "requirement": "Voltage Level = 380 kV",
+      "unit": "kV",
+      "technicalParams": {
+        "type": "Must-have",
+        "asset": "Gas-insulated switchgear / GIS bay"
+      },
+      "confidence": 0.75,
+      "evidence": "...SURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POINT)-PARTIAL DISCHARGE SENSOR-PDXX.YYFOR MONITORING, SEPERATE SENSOR-LCC CONTENT LIMIT/IEC DESI..."
+    },
+    {
+      "category": "GIS partial discharge monitoring",
+      "productCode": "GIS_PD_001",
+      "requirement": "Sensor Count = 618 count",
+      "unit": "count",
+      "technicalParams": {
+        "type": "Quantity Basis",
+        "asset": "Gas-insulated switchgear / GIS bay"
+      },
+      "confidence": 0.55,
+      "evidence": "...SURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POINT)-PARTIAL DISCHARGE SENSOR-PDXX.YYFOR MONITORING, SEPERATE SENSOR-LCC CONTENT LIMIT/IEC DESI..."
+    }
+  ],
+  "lineItems": [
+    {
+      "lineNumber": 1,
+      "productCode": "PROD_TBD_GIS_PD_001",
+      "product_model": "",
+      "product_id": "PROD_TBD_GIS_PD_001",
+      "description": "GIS PD Monitor",
+      "quantity": 12.0,
+      "unit": "set",
+      "technicalParams": {
+        "scenario": "GIS_PD_001",
+        "related": "PD Sensor=618; GIS Bay=12",
+        "review": "Needs Review",
+        "basis": "GIS bay / compartment / monitoring zone count (from drawing asset list: GIS Bay=12)"
+      },
+      "review_status": "Needs Review"
+    }
+  ],
+  "source": {
+    "fileName": "Sample submission 00796547",
+    "fileType": "sample",
+    "contentType": "",
+    "warnings": [],
+    "preview": "# Summary of Sensor Quantity.docx\nSummary of Sensor Quantity\nS. No. | Item Description | Indoor Sensor Quantity (In Nos.) | Outdoor Sensor Quantity (In Nos.) | Total Sensor Quantity (In Nos.)\n1 | 380kV GIS | 306 | 312 | 618\n\n# WA-1105363-01_2GPK516672-C_GSLD.pdf\n=C02FUTURE-4\nFUTUREFUTURE-4=C01=C02=C03=C04=C05SF6AIR3150 A\nOUTDOORINDOOR\n231P1P2P1P2CT-21CT-A\n231P1P2P1P2CT-11CT-A\n231P1P2P1P2CT-22CT-B\n231P1P2P1P2CT-11CT-A\n231P1P2P1P2CT-12CT-B\n231P1P2P1P2CT-31CT-A\n231P1P2P1P2CT-32CT-A\n-BD10ρ\n-BD13ρ\n-BD14ρ\n-BD33ρ\n=AC033=AC031=AC032\n-BD30ρ\n-BD34ρ\n-BD20ρ\n-BD24ρ\n-PD03.01MA807Q0-1SP3-13-BD12*ρ-BD11*ρ\nMA808Q0-3SP3-13\nMA809Q0-2SP3-13\n-BD23ρ\n2134P1P2P1P2CT-61CT-T-BD18ρMK832Q81-23\n-PD03.02-PD03.03\n-PD03.04-PD03.05\n-PD03.06\n-BD32*ρ-BD31*ρ\n-BD21*ρ-BD22*ρ\n-BD17*ρ\n-BD19ρ\n-PD03.11PT-809PT09DLPT809Q6-1\n=C03\nBUS-1A\nBUS-2A\nMD819Q1-1K825Q51-11-BD13ρ\nMD820Q1-2K826Q52-11\nMD821Q3-1K827Q51-31\nMD822Q3-2K828Q52-31\nMD823Q2-1K829Q51-21\nMD824Q2-2K830Q52-21\nMD825Q9-1K831Q81-11\nSCOPE OF SUPPLY=AC043=AC041=AC042-BD27ρ-PD04.21\nBESS (CKT-1)\n=C04\n-BD28*ρ\n231P1P2P1P2CT-12CT-B\n231P1P2P1P2CT-31CT-A\n231P1P2P1P2CT-32CT-A\n231P1P2P1P2CT-22CT-B\n231P1P2P1P2CT-21CT-A\n-BD10ρ\n-BD13ρ\n-BD14ρ\n-BD33ρ\n-BD30ρ\n-BD34ρ\n-BD20ρ\n-BD24ρ\n-PD04.01MA810Q0-1SP3-13-BD12*ρ-BD11*ρ\nMA811Q0-3SP3-13\nMA812Q0-2SP3-13\n-BD23ρ\n-PD04.02-PD04.03\n-PD04.04-PD04.05\n-PD04.06\n-BD32*ρ-BD31*ρ\n-BD21*ρ-BD22*ρ\nMD827Q1-1K835Q51-11-BD13ρ\nMD828Q1-2K836Q52-11\nMD829Q3-1K837Q51-31\nMD830Q3-2K838Q52-31\nMD831Q2-1K839Q51-21\nMD832Q2-2K840Q52-21\nMD834Q9-2K843Q82-112134P1P2P1P2CT-54CT-L\n-BD15ρ\n-BD25ρ\n380 kV, 3150 A, 63 kA - 1 s, 60 HzBUS-1A\n380 kV, 3150 A, 63 kA - 1 s, 60 Hz\n380 kV, 3150 A, 63 kA - 1 s, 60 Hz\nFUTUREFUTURE-1FUTURE-2\nFUTURE-1FUTURE-2=C01\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\nM3\nM3\nM3\nM1\nM1\nM1\nM1\nM1\nM1\nFUTURE-3\nFUTURE-3\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\n231P1P2P1P2\nM3\nM3\nM3\nM1\nM1\nM1\nM1\nM1\nM1\nOUTDOORINDOOR\nMK844Q82-23\n2134P1P2P1P2CT-53CT-L-BD17ρ\nMK842Q81-23\n-BD16ρ\n-BD18*ρ\n-PD04.11MD833Q9-1K841Q81-11\n-PD04.12\nM12134P1P2P1P2M3\nM12134P1P2P1P2M3PT-812PT12DLPT812Q6-2-BD29ρ\nSF6AIR3150 A\nSF6AIR3150 ASF6AIR3150 A\n-PD04.22\n-BD80ρ-BD81ρ-BD82ρ-BD83ρ-BD84ρ\n-BD62ρ-BD61ρ-BD60ρ-BD60ρ\nM12134P1P2P1P2M3\nSF6AIR3150 A\n-BD60ρ-BD61ρ-BD62ρ-BD63ρ-BD64ρ\nM12134P1P2P1P2M3\nSF6AIR3150 A\n-BD80ρ-BD81ρ-BD82ρ-BD83ρ\n-BD16ρ\n34521P1P2P1P2CT-52CT-I-BD27ρMK834Q82-23PT-810PT10DLPT810Q6-2\n-BD26ρ\n-BD28*ρ-BD29ρ\n-PD03.21MD826Q9-2K833Q82-11\n-PD03.22\nSF6AIR3150 ASA-801\n=AC053=AC051=AC052\n231P1P2P1P2CT-11CT-A\n231P1P2P1P2CT-12CT-B\n231P1P2P1P2CT-31CT-A\n231P1P2P1P2CT-32CT-A\n231P1P2P1P2CT-22CT-B\n231P1P2P1P2CT-21CT-A\n-BD10ρ\n-BD13ρ\n-BD14ρ\n-BD33ρ\n-BD30ρ\n-BD34ρ\n-BD20ρ\n-BD24ρ\n-PD05.01MA813Q0-1SP3-13-BD12*ρ-BD11*ρ\nMA814Q0-3SP3-13\nMA815Q0-2SP3-13\n-BD23ρ\n-PD05.02-PD05.03\n-PD05.04-PD05.05\n-PD05.06\n-BD32*ρ-BD31*ρ\n-BD21*ρ-BD22*ρ\nMD835Q1-1K845Q51-11-BD13ρ\nMD836Q1-2K846Q52-11\nMD837Q3-1K847Q51-31\nMD838Q3-2K848Q52-31\nMD839Q2-1K849Q51-21\nMD840Q2-2K850Q52-21\n-PD05.41PT-815PT15DLPT815Q6-3MD842Q9-3K853Q81-31\nP2231P2P1P2CT-41CT-CP2231P2P1P2CT-42"
+  },
+  "detectedScenarios": [
+    {
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "confidence": 0.9,
+      "asset_corroborated": true,
+      "evidence_count": 1,
+      "evidence_ids": [
+        "EVD-0002"
+      ],
+      "llm_in_scope": true,
+      "llm_rationale": "Evidence shows SF6 gas-insulated switchgear with PD sensors, gas density monitors, and pressure relief devices, clearly indicating GIS partial discharge monitoring."
+    }
+  ],
+  "informationComplete": false,
+  "missingInfoQuestions": [
+    {
+      "project_id": "00796547",
+      "missing_item": "Sensor type and coupling method",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Sensor type (UHF internal vs. external, acoustic, HFCT) determines the compatible acquisition hardware, calibration approach, and whether new GIS couplers must be retrofitted—directly impacting the BOQ and feasibility.",
+      "question": "Are the 618 PD sensors UHF internal couplers already installed in the GIS, or do you require externally mounted UHF/acoustic sensors? Please confirm the sensor type, coupling method, and whether GIS spacers/dielectric windows are available for UHF coupling.",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Channel-to-sensor architecture",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "618 sensors across 12 bays (~51 per bay) implies either high channel-count acquisition units or multiplexing—this defines the quantity and model of monitoring units and the overall system cost.",
+      "question": "How many PD acquisition channels per GIS bay are required, and should all 618 sensors be continuously monitored simultaneously, or multiplexed across fewer channels per bay?",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Monitoring mode (continuous online vs. periodic)",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Continuous online monitoring needs fixed acquisition hardware, central servers, and software licenses per bay, whereas periodic monitoring uses shared portable units—this fundamentally changes the BOQ structure and quantities.",
+      "question": "Do you require permanently installed continuous online PD monitoring, or a periodic/portable scanning solution for these 12 bays?",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Communication and integration requirements",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Protocol and software/integration scope determine gateway hardware, licensing, and engineering effort that must be itemized in the BOQ.",
+      "question": "What are the required communication protocols and integration targets (e.g., IEC 61850, DNP3, Modbus, SCADA/asset management) and is a centralized PD analysis/expert software platform needed?",
+      "priority": "Medium",
+      "owner": "Customer/System Integrator",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    }
+  ],
+  "missingInfoCount": 4,
+  "productMatching": [
+    {
+      "project_id": "00796547",
+      "requirement_id": "REQ-0001;REQ-0002;REQ-0003",
+      "candidate_product_id": "PROD_TBD_GIS_PD_001",
+      "candidate_model": "",
+      "family_id": "PF_GIS_PD",
+      "family_name": "GIS PD Monitor",
+      "scenario_match": "Yes",
+      "asset_match": "Yes",
+      "parameter_match_result": "Missing Data (product capability TBD)",
+      "match_score": 0.6,
+      "match_status": "Needs Review",
+      "matched_parameters": "",
+      "gap_or_risk": "Product model/parameter values are TBD in the data package. Capability data is TBD (capability_known=false): confirm specific model, UHF/acoustic sensor compatibility, 380kV qualification, and channel/concentrator architecture. Critically validate the unusually high sensor-to-bay ratio (618 sensors / 12 bays = ~51.5 per bay) which may indicate a data error or unsupported channel density requiring multiple acquisition units.",
+      "recommendation": "Conditionally recommend the GIS PD Monitor for the GIS partial discharge monitoring scenario (GIS_PD_001) at 380kV across 12 GIS bays, pending validation of product model and channel capacity against the 618 PD sensor count."
+    }
+  ]
+}

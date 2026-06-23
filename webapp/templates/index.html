@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Qualitrol POC 1 Requirement Extraction</title>
+  <style>
+    :root {
+      --ralliant-brown: #661400;
+      --ralliant-orange: #ed541d;
+      --ralliant-orange-soft: #fff1ea;
+      --ink: #1f1f1f;
+      --muted: #6f6f6f;
+      --line: #e7e0dc;
+      --paper: #ffffff;
+      --workspace: #f7f5f3;
+      --success: #13795b;
+      --success-soft: #e7f5ef;
+      --warning: #9a5b00;
+      --warning-soft: #fff6df;
+      --shadow: 0 16px 42px rgb(70 40 25 / 0.08);
+      --shadow-soft: 0 8px 24px rgb(70 40 25 / 0.06);
+      --radius-xl: 22px;
+      --radius-lg: 16px;
+      --radius-md: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-height: 100%; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgb(237 84 29 / 0.10), transparent 30%),
+        linear-gradient(180deg, #fbfaf8 0%, var(--workspace) 42%, #f3efec 100%);
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      border-bottom: 1px solid var(--line);
+      background: rgb(255 255 255 / 0.92);
+      backdrop-filter: blur(18px);
+    }
+
+    .topbar-inner {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 14px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, var(--ralliant-brown), var(--ralliant-orange));
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      box-shadow: 0 10px 24px rgb(102 20 0 / 0.22);
+    }
+
+    .brand-logo {
+      height: 40px;
+      width: auto;
+      display: block;
+    }
+
+    .brand-divider {
+      width: 1px;
+      height: 34px;
+      background: var(--line);
+      margin: 0 2px;
+    }
+
+    .brand-eyebrow {
+      margin: 0 0 3px;
+      color: var(--ralliant-brown);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .topbar h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      text-align: left;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .app-shell {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 28px 32px 48px;
+    }
+
+    .poc-subheader {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    .poc-title {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+      font-weight: 850;
+    }
+
+    .poc-copy {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .process-tabs {
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: rgb(255 255 255 / 0.76);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+    }
+
+    .process-tabs-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px 0;
+    }
+
+    .process-tabs-title {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .nav-stack {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 8px 10px 10px;
+      scrollbar-width: thin;
+    }
+
+    .tab-btn {
+      position: relative;
+      min-height: 46px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: transparent;
+      color: #6d625e;
+      font-size: 14px;
+      font-weight: 750;
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+    }
+
+    .tab-btn:hover {
+      transform: translateY(-1px);
+      background: var(--ralliant-orange-soft);
+      color: var(--ralliant-brown);
+    }
+
+    .tab-btn.active {
+      background: var(--ralliant-brown);
+      color: #fff;
+      box-shadow: 0 12px 28px rgb(102 20 0 / 0.18);
+    }
+
+    .tab-btn span:first-child {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: rgb(102 20 0 / 0.10);
+      color: var(--ralliant-brown);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .tab-btn.active span:first-child {
+      background: rgb(255 255 255 / 0.18);
+      color: #fff;
+    }
+
+    .workspace-grid,
+    .two-column,
+    .review-grid,
+    .pricing-grid,
+    .sync-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .two-column {
+      grid-template-columns: minmax(0, 1.32fr) minmax(320px, 0.68fr);
+    }
+
+    .review-grid,
+    .sync-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pricing-grid {
+      grid-template-columns: 320px minmax(0, 1fr);
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+      animation: panelIn 300ms cubic-bezier(.2, .8, .2, 1);
+    }
+
+    @keyframes panelIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px) scale(0.992);
+        filter: blur(2px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter: blur(0);
+      }
+    }
+
+    .hidden { display: none !important; }
+
+    .card,
+    .signal-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: rgb(255 255 255 / 0.92);
+      box-shadow: var(--shadow);
+    }
+
+    .card {
+      overflow: hidden;
+    }
+
+    .card-body,
+    .signal-card {
+      padding: 22px;
+    }
+
+    .section-kicker {
+      margin: 0 0 8px;
+      color: var(--ralliant-orange);
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0.17em;
+      text-transform: uppercase;
+    }
+
+    .section-heading {
+      margin: 0;
+      color: var(--ink);
+      font-size: 22px;
+      font-weight: 820;
+      letter-spacing: -0.025em;
+    }
+
+    .section-copy {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #f1ece8;
+      color: #5f504b;
+      font-size: 12px;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+
+    .badge.success {
+      background: var(--success-soft);
+      color: var(--success);
+    }
+
+    .badge.accent {
+      background: var(--ralliant-orange-soft);
+      color: var(--ralliant-brown);
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .drop-zone {
+      min-height: 310px;
+      padding: 46px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      border: 1.8px dashed #d6c8c0;
+      border-radius: var(--radius-xl);
+      background:
+        linear-gradient(180deg, rgb(255 255 255 / 0.92), rgb(255 248 244 / 0.78)),
+        radial-gradient(circle at center, rgb(237 84 29 / 0.10), transparent 48%);
+      cursor: pointer;
+      transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .drop-zone:hover {
+      transform: translateY(-2px);
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 18px 40px rgb(237 84 29 / 0.10);
+    }
+
+    .drop-zone svg {
+      width: 68px;
+      height: 68px;
+      color: var(--ralliant-orange);
+      margin-bottom: 18px;
+      transition: transform 220ms ease;
+    }
+
+    .drop-zone:hover svg {
+      transform: translateY(-4px);
+    }
+
+    .drop-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 850;
+    }
+
+    .drop-subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .file-queue {
+      margin-top: 18px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .file-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border: 1px solid #efe4de;
+      border-radius: 16px;
+      background: #fffaf7;
+      animation: fileIn 180ms ease both;
+    }
+
+    @keyframes fileIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .file-pill-main {
+      min-width: 0;
+    }
+
+    .file-pill-name {
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-pill-meta {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .file-pill-remove {
+      flex: 0 0 auto;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: #fff;
+      color: var(--ralliant-brown);
+      border: 1px solid #eadbd3;
+      cursor: pointer;
+      transition: 160ms ease;
+    }
+
+    .file-pill-remove:hover {
+      background: var(--ralliant-orange-soft);
+      transform: scale(1.04);
+    }
+
+    .field-label {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 820;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .field-input {
+      width: 100%;
+      border: 1px solid #d6cbc5;
+      border-radius: 12px;
+      padding: 10px 12px;
+      color: var(--ink);
+      background: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .field-input:focus {
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 0 0 4px rgb(237 84 29 / 0.11);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn-primary,
+    .btn-secondary {
+      min-height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 820;
+      cursor: pointer;
+      transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    }
+
+    .btn-primary {
+      color: #fff;
+      background: var(--ralliant-brown);
+      box-shadow: 0 10px 24px rgb(102 20 0 / 0.20);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: #7c1c00;
+    }
+
+    .btn-secondary {
+      border: 1px solid #d8cbc4;
+      color: var(--ralliant-brown);
+      background: #fff;
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: var(--ralliant-orange-soft);
+    }
+
+    .btn-primary:disabled,
+    .btn-secondary:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+      box-shadow: none;
+    }
+
+    .selected-card {
+      padding: 18px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .progress-card {
+      padding: 18px 20px;
+    }
+
+    .progress-inline {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #5f504b;
+      font-weight: 760;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 3px solid #f2d5c9;
+      border-top-color: var(--ralliant-orange);
+      animation: spin 900ms linear infinite;
+      flex: 0 0 auto;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .result-head,
+    .review-head,
+    .card-head {
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .result-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .result-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 14px;
+      color: var(--success);
+      background: var(--success-soft);
+    }
+
+    .stats-grid {
+      padding: 18px 20px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .stat-tile {
+      padding: 14px;
+      border-radius: 16px;
+      background: #fbf8f6;
+      border: 1px solid #f0e8e3;
+      text-align: center;
+    }
+
+    .stat-value {
+      margin: 0;
+      color: var(--ralliant-brown);
+      font-size: 27px;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .stat-label {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .result-actions {
+      padding: 0 20px 20px;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .warning-box {
+      margin-top: 14px;
+      border: 1px solid #f3d58a;
+      border-radius: 14px;
+      background: var(--warning-soft);
+      color: var(--warning);
+      padding: 12px;
+      font-size: 12px;
+    }
+
+    .empty-notice {
+      margin-top: 18px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 18px 20px;
+      border: 1px solid #f3d58a;
+      border-radius: var(--radius-xl);
+      background: var(--warning-soft);
+    }
+
+    .empty-notice-icon {
+      flex: 0 0 auto;
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #f5c451;
+      color: #7a4a00;
+      font-weight: 900;
+    }
+
+    .missing-info-panel {
+      margin-top: 18px;
+      border: 1px solid #d8e4f0;
+      border-radius: var(--radius-xl);
+      background: #f7fafc;
+      overflow: hidden;
+    }
+
+    .missing-info-head {
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid #d8e4f0;
+      background: #eef4f9;
+    }
+
+    .missing-info-list article {
+      padding: 16px 20px;
+      border-top: 1px solid #e8eef4;
+    }
+
+    .missing-info-list article:first-child {
+      border-top: 0;
+    }
+
+    .priority-high {
+      background: #fde8e8;
+      color: #9b1c1c;
+    }
+
+    .priority-medium {
+      background: #fff6df;
+      color: #9a5b00;
+    }
+
+    .priority-low {
+      background: #eef4f9;
+      color: #3d5a73;
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px 20px;
+      max-height: 480px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #4d4542;
+      background: #fffdfc;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid #f0e8e3;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #fbf8f6;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    td.text-right,
+    th.text-right {
+      text-align: right;
+    }
+
+    .requirements-list article,
+    .requirements-list > div {
+      padding: 18px 20px;
+      border-top: 1px solid #f0e8e3;
+    }
+
+    blockquote {
+      margin: 12px 0 0;
+      border-left: 4px solid var(--ralliant-orange);
+      border-radius: 0 12px 12px 0;
+      background: var(--ralliant-orange-soft);
+      padding: 10px 12px;
+      color: #5f504b;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .app-footer {
+      max-width: 1440px;
+      margin: 0;
+      padding: 0 28px 30px;
+      color: #8a7b75;
+      text-align: left;
+      font-size: 12px;
+    }
+
+    @media (max-width: 980px) {
+      .topbar-inner,
+      .poc-subheader,
+      .selected-card,
+      .result-head,
+      .review-head,
+      .card-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .topbar-inner,
+      .poc-subheader {
+        display: flex;
+      }
+
+      .two-column,
+      .review-grid,
+      .pricing-grid,
+      .sync-grid,
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-lockup">
+        <img src="/static/qualitrol-logo.png" alt="Qualitrol — Defining Reliability" class="brand-logo" />
+        <div class="brand-divider"></div>
+        <div>
+          <p class="brand-eyebrow">Ralliant · Qualitrol</p>
+          <h1>POC 1 Requirement Extraction</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="badge success"><span class="status-dot"></span> API Online</span>
+        <span class="badge accent" id="llm-mode-badge">Checking AI Runtime</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <section class="poc-subheader">
+      <div>
+        <h2 class="poc-title">AI-assisted Qualitrol requirement extraction</h2>
+        <p class="poc-copy">Upload customer documents, trigger Opus 4.8 only when ready, and review product requirements with source evidence before downstream quotation work.</p>
+      </div>
+      <div class="badge accent">PDF · DOCX · XLSX · PPTX · EML · CSV · TXT · MD</div>
+    </section>
+
+    <nav class="process-tabs">
+      <div class="process-tabs-header">
+        <p class="process-tabs-title">POC Workflow</p>
+      </div>
+      <div class="nav-stack" role="tablist" aria-label="POC workflow tabs">
+        <button class="tab-btn active" data-tab="ingestion" type="button">
+          <span>1</span>
+          <span>File Ingestion</span>
+        </button>
+        <button class="tab-btn" data-tab="boq" type="button">
+          <span>2</span>
+          <span>Requirement Review</span>
+        </button>
+        <button class="tab-btn hidden" data-tab="pricing" type="button">
+          <span>3</span>
+          <span>Dynamic Pricing</span>
+        </button>
+        <button class="tab-btn hidden" data-tab="sync" type="button">
+          <span>4</span>
+          <span>Sync Dashboard</span>
+        </button>
+      </div>
+    </nav>
+
+    <main class="content-main">
+      <section id="tab-ingestion" class="tab-panel active">
+        <div class="two-column">
+          <div id="drop-zone" class="drop-zone">
+            <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+            </svg>
+            <p class="drop-title">Drop a customer requirement file here</p>
+            <p class="drop-subtitle">or browse one or multiple files · PDF, DOCX, XLSX/XLSM, PPTX, EML, MSG, CSV, TXT, MD</p>
+            <input type="file" id="file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xlsm,.pptx,.eml,.msg,.csv,.txt,.md" />
+          </div>
+
+          <aside class="signal-card">
+            <p class="section-kicker">Extraction Runtime</p>
+            <h3 class="section-heading" id="runtime-title">Loading POC 1 status...</h3>
+            <p class="section-copy" id="runtime-copy">Checking whether the app will call an LLM endpoint or use local rules.</p>
+            <div style="margin-top: 20px;">
+              <span class="field-label">Supported Inputs</span>
+              <div id="supported-types" class="chip-row" style="justify-content: flex-start;">
+                <span class="badge">Loading...</span>
+              </div>
+            </div>
+            <div class="warning-box" style="margin-top: 20px;">
+              Analysis is manually triggered. Use terminate if the LLM request takes too long.
+            </div>
+          </aside>
+        </div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="selected-card">
+            <div>
+              <span class="field-label">Selected File</span>
+              <h3 class="section-heading" id="selected-file-name">No file selected yet</h3>
+              <p class="section-copy" id="selected-file-meta">Choose a document first, then click Start LLM Analysis.</p>
+              <div id="selected-files-list" class="file-queue"></div>
+            </div>
+            <div class="button-row">
+              <button id="btn-start-analysis" class="btn-primary" disabled>Start LLM Analysis</button>
+              <button id="btn-cancel-analysis" class="btn-secondary" disabled>No Active Analysis</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="upload-progress" class="hidden card progress-card" style="margin-top: 18px;">
+          <div class="progress-inline">
+            <span class="spinner"></span>
+            <span>Extracting file text, selecting Qualitrol requirements, and preparing evidence snippets...</span>
+          </div>
+        </div>
+
+        <div id="upload-result" class="hidden card" style="margin-top: 18px;">
+          <div class="result-head">
+            <div class="result-meta">
+              <div class="result-icon">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
+                </svg>
+              </div>
+              <div>
+                <h3 class="section-heading" id="upload-filename">-</h3>
+                <p class="section-copy" id="upload-meta">-</p>
+              </div>
+            </div>
+            <span class="badge success">Extracted</span>
+          </div>
+          <div class="stats-grid">
+            <div class="stat-tile"><p class="stat-value" id="stat-items">0</p><p class="stat-label">Requirements</p></div>
+            <div class="stat-tile"><p class="stat-value" id="stat-confidence">-</p><p class="stat-label">Confidence</p></div>
+            <div class="stat-tile"><p class="stat-value" id="stat-time">-</p><p class="stat-label">Processing</p></div>
+            <div class="stat-tile"><p class="stat-value" id="stat-case">-</p><p class="stat-label">Case ID</p></div>
+          </div>
+          <div class="result-actions">
+            <button id="goto-boq" class="btn-primary">Review Requirements & Evidence</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-boq" class="tab-panel">
+        <div class="review-head card">
+          <div class="card-body" style="padding: 0;">
+            <p class="section-kicker">Review</p>
+            <h2 class="section-heading">Requirement Review - Source + Evidence</h2>
+            <p class="section-copy">Validate extracted Qualitrol product needs before handing results to pricing, CRM, or proposal generation.</p>
+          </div>
+          <span class="badge" id="boq-status">Pending Review</span>
+        </div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="card-body">
+            <div style="display: flex; justify-content: space-between; gap: 16px; align-items: flex-start;">
+              <div>
+                <p class="section-kicker">Extraction Summary</p>
+                <p id="extraction-summary" class="section-copy">Load the sample or upload a document to see extracted requirements.</p>
+              </div>
+              <div id="feature-chips" class="chip-row"></div>
+            </div>
+            <div id="warnings-list" class="hidden warning-box"></div>
+          </div>
+        </div>
+
+        <div id="empty-extraction-notice" class="hidden empty-notice">
+          <div class="empty-notice-icon">!</div>
+          <div>
+            <h3 class="section-heading" style="font-size:17px;">No requirements extracted from your upload</h3>
+            <p class="section-copy" id="empty-extraction-detail" style="margin-top:4px;"></p>
+          </div>
+        </div>
+
+        <div id="missing-info-panel" class="hidden missing-info-panel">
+          <div class="missing-info-head">
+            <div>
+              <p class="section-kicker" style="margin-bottom:4px;">Clarifications</p>
+              <h3 class="section-heading" style="font-size:18px;">Missing Information Questions</h3>
+              <p class="section-copy" style="margin-top:4px;">Items to confirm with the customer before finalizing the BOQ.</p>
+            </div>
+            <span class="badge" id="missing-info-count">0 open</span>
+          </div>
+          <div id="missing-info-list" class="missing-info-list"></div>
+        </div>
+
+        <div class="review-grid" style="margin-top: 18px;">
+          <div class="card">
+            <div class="card-head">
+              <h3 class="section-heading">Source Text Preview</h3>
+              <span class="badge" id="source-badge">raw_specification.txt</span>
+            </div>
+            <pre id="source-doc">Loading source document...</pre>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3 class="section-heading">Qualitrol Product Lines</h3>
+              <span class="badge accent" id="boq-ref">-</span>
+            </div>
+            <div style="overflow:auto; max-height: 480px;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Product Code</th>
+                    <th>Description</th>
+                    <th class="text-right">Qty</th>
+                    <th>Tech Params</th>
+                  </tr>
+                </thead>
+                <tbody id="boq-table-body">
+                  <tr><td colspan="5" style="text-align:center; color: var(--muted); padding: 32px;">Loading BOQ...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="button-row" style="justify-content: flex-end; padding: 16px 20px;">
+              <button class="btn-secondary" id="btn-reload-boq">Reload Sample</button>
+              <button class="btn-primary" id="btn-approve-boq">Mark Extraction Reviewed</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="card-head">
+            <h3 class="section-heading">Requirement Evidence List</h3>
+          </div>
+          <div id="requirements-list" class="requirements-list">
+            <div style="text-align:center; color: var(--muted);">No requirements loaded yet</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-pricing" class="tab-panel">
+        <div>
+          <p class="section-kicker">Pricing</p>
+          <h2 class="poc-title">Dynamic Pricing Engine</h2>
+          <p class="poc-copy">Excel pricing formulas embedded in backend Python. This area is hidden from the current POC navigation but kept for compatibility.</p>
+        </div>
+        <div class="pricing-grid" style="margin-top: 18px;">
+          <div class="card">
+            <div class="card-body">
+              <h3 class="section-heading">Pricing Inputs</h3>
+              <div style="margin-top: 16px;">
+                <label class="field-label" for="input-cost">Base Cost (USD)</label>
+                <input type="number" id="input-cost" class="field-input" value="10000" min="0" step="100" />
+              </div>
+              <div style="margin-top: 14px;">
+                <label class="field-label" for="input-margin">Gross Margin (%)</label>
+                <input type="number" id="input-margin" class="field-input" value="25" min="0" max="99" step="1" />
+              </div>
+              <div style="margin-top: 14px;">
+                <label class="field-label" for="input-discount">Customer Discount (%)</label>
+                <input type="number" id="input-discount" class="field-input" value="12" min="0" max="100" step="1" />
+              </div>
+              <button id="btn-calculate" class="btn-primary" style="margin-top: 18px; width: 100%;">Calculate</button>
+              <p id="pricing-error" class="hidden" style="color: #b42318; font-size: 12px; margin-top: 10px;"></p>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div class="stats-grid" style="padding:0; grid-template-columns: repeat(2,minmax(0,1fr));">
+                <div class="stat-tile">
+                  <p class="stat-label">Final Unit Price</p>
+                  <p class="stat-value" id="result-unit-price">-</p>
+                  <p class="section-copy" id="result-formula">Run a calculation to see results</p>
+                </div>
+                <div class="stat-tile">
+                  <p class="stat-label">Quotation Grand Total</p>
+                  <p class="stat-value" id="result-grand-total">-</p>
+                  <p class="section-copy" id="result-terms">-</p>
+                </div>
+              </div>
+            </div>
+            <div style="overflow:auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th class="text-right">Qty</th>
+                    <th class="text-right">Unit Price</th>
+                    <th class="text-right">Disc %</th>
+                    <th class="text-right">Net Unit</th>
+                    <th class="text-right">Line Total</th>
+                  </tr>
+                </thead>
+                <tbody id="pricing-table-body">
+                  <tr><td colspan="6" style="text-align:center; color: var(--muted); padding: 32px;">No pricing calculated yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-sync" class="tab-panel">
+        <div>
+          <p class="section-kicker">Sync</p>
+          <h2 class="poc-title">Sync & Document Generation Dashboard</h2>
+          <p class="poc-copy">Mock Salesforce status and conditional Word assembly. Hidden from current POC navigation.</p>
+        </div>
+        <div class="sync-grid" style="margin-top: 18px;">
+          <div class="card">
+            <div class="card-body">
+              <h3 class="section-heading">Salesforce Sync</h3>
+              <dl id="sf-details" style="font-size: 14px;">
+                <div style="display:flex; justify-content:space-between; padding: 10px 0; border-bottom: 1px solid var(--line);">
+                  <dt style="color: var(--muted);">Status</dt>
+                  <dd style="margin:0;">Loading...</dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div style="display:flex; justify-content:space-between; gap: 12px;">
+                <h3 class="section-heading">Word DocGen</h3>
+                <span class="badge accent" id="docgen-badge">Engine Ready</span>
+              </div>
+              <ul id="docgen-rules" style="color: var(--muted); line-height: 1.7;">
+                <li>Loading rules...</li>
+              </ul>
+              <button id="btn-generate-doc" class="btn-primary" style="width:100%;">Generate Quotation Document</button>
+            </div>
+          </div>
+        </div>
+        <div id="docgen-result" class="hidden card" style="margin-top: 18px;">
+          <div class="card-body">
+            <h3 class="section-heading" id="docgen-filename">-</h3>
+            <p class="section-copy" id="docgen-meta">-</p>
+            <div class="sync-grid" style="margin-top: 14px;">
+              <div class="warning-box" style="background: var(--success-soft); color: var(--success); border-color: #a7dec8;">
+                <strong>Clauses Included</strong>
+                <ul id="docgen-included"></ul>
+              </div>
+              <div class="warning-box">
+                <strong>Clauses Stripped</strong>
+                <ul id="docgen-stripped"></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="app-footer">
+    Qualitrol Quotation Agent · FastAPI + local CSS · Demo Data via Harness Sandbox
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

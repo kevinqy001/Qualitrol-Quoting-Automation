@@ -1,0 +1,255 @@
+{
+  "project_id": "00796547",
+  "step": "1_extract_info",
+  "llm": {
+    "enabled": true,
+    "available": true,
+    "used": true,
+    "provider": "anthropic_foundry",
+    "model": "claude-opus-4-8",
+    "scenarios_dropped_by_llm": [
+      {
+        "scenario_id": "TR_PD_001",
+        "scenario": "Transformer partial discharge monitoring",
+        "asset_type": "Power transformer",
+        "confidence": 0.1,
+        "asset_corroborated": false,
+        "evidence_count": 3,
+        "evidence_ids": [
+          "EVD-0004",
+          "EVD-0005",
+          "EVD-0006"
+        ],
+        "llm_in_scope": false,
+        "llm_rationale": "The PD references are GIS bay tags and SF6 compartments, not power-transformer partial discharge, so this is a false positive from shared 'PD' terminology."
+      },
+      {
+        "scenario_id": "CAB_ENV_001",
+        "scenario": "Cabinet or substation environmental monitoring",
+        "asset_type": "Monitoring cabinet, control room, outdoor enclosure",
+        "confidence": 0.2,
+        "asset_corroborated": false,
+        "evidence_count": 1,
+        "evidence_ids": [
+          "EVD-0001"
+        ],
+        "llm_in_scope": false,
+        "llm_rationale": "Humidity absorbers and gas-compartment pressure indication are integral GIS features, not a dedicated cabinet/substation environmental monitoring scenario."
+      },
+      {
+        "scenario_id": "TR_AUX_001",
+        "scenario": "Transformer auxiliary protection and indication",
+        "asset_type": "Oil-filled transformer",
+        "confidence": 0.1,
+        "asset_corroborated": false,
+        "evidence_count": 1,
+        "evidence_ids": [
+          "EVD-0003"
+        ],
+        "llm_in_scope": false,
+        "llm_rationale": "Pressure relief device and gas density monitor here belong to SF6 GIS gas compartments, not an oil-filled transformer auxiliary protection context."
+      }
+    ]
+  },
+  "documents": [
+    {
+      "file_name": "Summary of Sensor Quantity.docx",
+      "doc_type": "Equipment List / BOQ",
+      "segments": 3
+    },
+    {
+      "file_name": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "doc_type": "Drawing / SLD",
+      "segments": 5
+    }
+  ],
+  "detected_scenarios": [
+    {
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "confidence": 0.9,
+      "asset_corroborated": true,
+      "evidence_count": 1,
+      "evidence_ids": [
+        "EVD-0002"
+      ],
+      "llm_in_scope": true,
+      "llm_rationale": "Evidence shows SF6 gas-insulated switchgear with PD sensors, gas density monitors, and pressure relief devices, clearly indicating GIS partial discharge monitoring."
+    }
+  ],
+  "extracted_evidence": [
+    {
+      "evidence_id": "EVD-0001",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 1",
+      "evidence_text": "...TACT (BD..*)7.ALL GAS COMPARTMENT PRESSURE WILL BEMEASURED/INDICATED IN THE UNIT OF kPA.8.HUMIDITY ABSORBERS (FILTERS) ARE INSERTED IN ALL GASCOMPARTMENTS.9.FINAL QUANTITY OF SURGE...",
+      "scenario_id": "CAB_ENV_001",
+      "scenario": "Cabinet or substation environmental monitoring",
+      "asset_type": "Monitoring cabinet, control room, outdoor enclosure",
+      "asset_tag": "",
+      "confidence": 0.6,
+      "notes": "Matched scenario keyword 'humidity'."
+    },
+    {
+      "evidence_id": "EVD-0002",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 1",
+      "evidence_text": "...SURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POINT)-PARTIAL DISCHARGE SENSOR-PDXX.YYFOR MONITORING, SEPERATE SENSOR-LCC CONTENT LIMIT/IEC DESI...",
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "asset_tag": "",
+      "confidence": 0.6,
+      "notes": "Matched scenario keyword 'partial discharge'."
+    },
+    {
+      "evidence_id": "EVD-0003",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 1",
+      "evidence_text": "...OPERATED BY HAND)-PARTITION INSULATOR-END COVER-REMOVABLE LINK /LATERAL DISMANTLING PIECE-PRESSURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POI...",
+      "scenario_id": "TR_AUX_001",
+      "scenario": "Transformer auxiliary protection and indication",
+      "asset_type": "Oil-filled transformer",
+      "asset_tag": "",
+      "confidence": 0.6,
+      "notes": "Matched scenario keyword 'pressure relief'."
+    },
+    {
+      "evidence_id": "EVD-0004",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 1",
+      "evidence_text": "...SURE RELIEF DEVICE WITH ADSORBENTρ-GAS DENSITY MONITOR-SF6 CONNECTION (GAS FILLING POINT)-PARTIAL DISCHARGE SENSOR-PDXX.YYFOR MONITORING, SEPERATE SENSOR-LCC CONTENT LIMIT/IEC DESI...",
+      "scenario_id": "TR_PD_001",
+      "scenario": "Transformer partial discharge monitoring",
+      "asset_type": "Power transformer",
+      "asset_tag": "",
+      "confidence": 0.6,
+      "notes": "Matched scenario keyword 'partial discharge'."
+    },
+    {
+      "evidence_id": "EVD-0005",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 1",
+      "evidence_text": "...25-PD03.26-PD03.27-PD03.28-PD03.29-PD03.30-PD03.31 +XG81+XG82+XG83+XG84-PDSF6CABLE3150 A -PD-PD05.13-PD05.14-PD05.15+XG61 -PD05.42-PD05.43-PD05.44-PD05.45(B only)+XG71-PD05.23-PD05...",
+      "scenario_id": "TR_PD_001",
+      "scenario": "Transformer partial discharge monitoring",
+      "asset_type": "Power transformer",
+      "asset_tag": "",
+      "confidence": 0.45,
+      "notes": "Matched scenario keyword 'PD'."
+    },
+    {
+      "evidence_id": "EVD-0006",
+      "project_id": "00796547",
+      "source_document": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "location": "page 3",
+      "evidence_text": "...3 -PD10.13+XG61-PD10.14-PD10.15+XG62-PD10.16-PD10.17+XG63-BD65(B only)ρ -PD10.18(B only) -PD -PD11.23-PD11.24 +XG81-PD10.23-PD10.24-PD10.25+XG82-PD10.26-PD10.27(B only) +XG81-PD11....",
+      "scenario_id": "TR_PD_001",
+      "scenario": "Transformer partial discharge monitoring",
+      "asset_type": "Power transformer",
+      "asset_tag": "",
+      "confidence": 0.45,
+      "notes": "Matched scenario keyword 'PD'."
+    }
+  ],
+  "drawing_asset_list": [
+    {
+      "project_id": "00796547",
+      "drawing_id": "Summary of Sensor Quantity.docx",
+      "asset_tag": "GIS sensor quantity (customer-stated)",
+      "asset_type": "PD Sensor",
+      "voltage_level": "380 kV",
+      "rating": "",
+      "quantity": 618.0,
+      "connected_to": "",
+      "monitoring_zone": "Partial discharge",
+      "source_location": "Summary of Sensor Quantity.docx::table 2 row 2",
+      "confidence": 0.75,
+      "notes": "Customer-provided sensor quantity table. Use to cross-check SLD-derived counts."
+    },
+    {
+      "project_id": "00796547",
+      "drawing_id": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "asset_tag": "=C03; =C04; =C05; =C06; =C07; =C08; =C09; =C10; =C11; =C12; =C13; =C14",
+      "asset_type": "GIS Bay",
+      "voltage_level": "380 kV",
+      "rating": "",
+      "quantity": 12.0,
+      "connected_to": "",
+      "monitoring_zone": "GIS lineup",
+      "source_location": "WA-1105363-01_2GPK516672-C_GSLD.pdf (SLD)",
+      "confidence": 0.45,
+      "notes": "Bay count derived from =Cxx labels on the SLD text layer; verify against the GIS layout drawing (CR_004). Excludes =C00/=C01/=C02 (bus/general columns)."
+    },
+    {
+      "project_id": "00796547",
+      "drawing_id": "WA-1105363-01_2GPK516672-C_GSLD.pdf",
+      "asset_tag": "178 monitored PD sensors",
+      "asset_type": "PD Sensor",
+      "voltage_level": "380 kV",
+      "rating": "",
+      "quantity": 178.0,
+      "connected_to": "GIS",
+      "monitoring_zone": "Partial discharge",
+      "source_location": "WA-1105363-01_2GPK516672-C_GSLD.pdf (SLD, -PDxx.yy tags)",
+      "confidence": 0.4,
+      "notes": "Counted distinct -PDxx.yy monitoring-sensor tags. Sensitivity-check-only -PD tags are not counted. Confirm monitored vs spare sensors with engineering."
+    }
+  ],
+  "structured_requirements": [
+    {
+      "requirement_id": "REQ-0001",
+      "project_id": "00796547",
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "asset_tag": "",
+      "metric_id": "MET_GIS_BAY_COUNT",
+      "metric_name": "GIS Bay Count",
+      "parameter_value": "12",
+      "unit": "count",
+      "requirement_type": "Quantity Basis",
+      "evidence_id": "EVD-0002",
+      "confidence": 0.55,
+      "missing_or_assumption": "Quantity inferred from drawing asset list (GIS Bay); verify against SLD / customer."
+    },
+    {
+      "requirement_id": "REQ-0002",
+      "project_id": "00796547",
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "asset_tag": "",
+      "metric_id": "MET_VOLTAGE_LEVEL",
+      "metric_name": "Voltage Level",
+      "parameter_value": "380",
+      "unit": "kV",
+      "requirement_type": "Must-have",
+      "evidence_id": "EVD-0002",
+      "confidence": 0.75,
+      "missing_or_assumption": ""
+    },
+    {
+      "requirement_id": "REQ-0003",
+      "project_id": "00796547",
+      "scenario_id": "GIS_PD_001",
+      "scenario": "GIS partial discharge monitoring",
+      "asset_type": "Gas-insulated switchgear / GIS bay",
+      "asset_tag": "",
+      "metric_id": "MET_SENSOR_COUNT",
+      "metric_name": "Sensor Count",
+      "parameter_value": "618",
+      "unit": "count",
+      "requirement_type": "Quantity Basis",
+      "evidence_id": "EVD-0002",
+      "confidence": 0.55,
+      "missing_or_assumption": "Quantity inferred from drawing asset list (PD Sensor); verify against SLD / customer."
+    }
+  ]
+}

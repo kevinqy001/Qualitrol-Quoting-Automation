@@ -1,0 +1,25 @@
+{
+  "focus": "Step 1 (Extract Info) + Step 2 (Create BOQ)",
+  "supportedFileTypes": {
+    ".csv": "CSV",
+    ".docx": "DOCX",
+    ".eml": "EML",
+    ".md": "MD",
+    ".msg": "MSG",
+    ".pdf": "PDF",
+    ".pptx": "PowerPoint",
+    ".txt": "TXT",
+    ".xlsm": "Excel (macro)",
+    ".xlsx": "Excel"
+  },
+  "llm": {
+    "configured": false
+  },
+  "fallback": "static_demo",
+  "targetOutputs": [
+    "requirements",
+    "lineItems",
+    "features",
+    "source.preview"
+  ]
+}

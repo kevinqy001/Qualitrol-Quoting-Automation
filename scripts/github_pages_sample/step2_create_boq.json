@@ -1,0 +1,110 @@
+{
+  "project_id": "00796547",
+  "step": "2_create_boq",
+  "llm": {
+    "enabled": true,
+    "available": true,
+    "used": true,
+    "provider": "anthropic_foundry",
+    "model": "claude-opus-4-8"
+  },
+  "information_complete": false,
+  "decision": "Generate Missing Info Questions (human clarification first)",
+  "boq_summary": {
+    "total_lines": 1,
+    "lines_needing_review": 1,
+    "lines_draft_ready": 0
+  },
+  "product_matching": [
+    {
+      "project_id": "00796547",
+      "requirement_id": "REQ-0001;REQ-0002;REQ-0003",
+      "candidate_product_id": "PROD_TBD_GIS_PD_001",
+      "candidate_model": "",
+      "family_id": "PF_GIS_PD",
+      "family_name": "GIS PD Monitor",
+      "scenario_match": "Yes",
+      "asset_match": "Yes",
+      "parameter_match_result": "Missing Data (product capability TBD)",
+      "match_score": 0.6,
+      "match_status": "Needs Review",
+      "matched_parameters": "",
+      "gap_or_risk": "Product model/parameter values are TBD in the data package. Capability data is TBD (capability_known=false): confirm specific model, UHF/acoustic sensor compatibility, 380kV qualification, and channel/concentrator architecture. Critically validate the unusually high sensor-to-bay ratio (618 sensors / 12 bays = ~51.5 per bay) which may indicate a data error or unsupported channel density requiring multiple acquisition units.",
+      "recommendation": "Conditionally recommend the GIS PD Monitor for the GIS partial discharge monitoring scenario (GIS_PD_001) at 380kV across 12 GIS bays, pending validation of product model and channel capacity against the 618 PD sensor count."
+    }
+  ],
+  "compatibility_flags": [
+    {
+      "rule_id": "CR_004",
+      "scenario_id": "GIS_PD_001",
+      "severity": "High",
+      "triggered": false,
+      "rule_type": "Review",
+      "action": "Do not finalize GIS PD quantity; create missing information question."
+    }
+  ],
+  "draft_boq": [
+    {
+      "boq_line": 1,
+      "project_id": "00796547",
+      "product_id": "PROD_TBD_GIS_PD_001",
+      "product_model": "",
+      "product_description": "GIS PD Monitor",
+      "scenario_id": "GIS_PD_001",
+      "related_assets": "PD Sensor=618; GIS Bay=12",
+      "quantity": 12.0,
+      "unit": "set",
+      "quantity_basis": "GIS bay / compartment / monitoring zone count (from drawing asset list: GIS Bay=12)",
+      "assumption": "Do not estimate without GIS layout.",
+      "confidence": 0.6,
+      "review_status": "Needs Review",
+      "notes": "Product model/parameter values are TBD in the data package. Capability data is TBD (capability_known=false): confirm specific model, UHF/acoustic sensor compatibility, 380kV qualification, and channel/concentrator architecture. Critically validate the unusually high sensor-to-bay ratio (618 sensors / 12 bays = ~51.5 per bay) which may indicate a data error or unsupported channel density requiring multiple acquisition units."
+    }
+  ],
+  "missing_info_questions": [
+    {
+      "project_id": "00796547",
+      "missing_item": "Sensor type and coupling method",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Sensor type (UHF internal vs. external, acoustic, HFCT) determines the compatible acquisition hardware, calibration approach, and whether new GIS couplers must be retrofitted—directly impacting the BOQ and feasibility.",
+      "question": "Are the 618 PD sensors UHF internal couplers already installed in the GIS, or do you require externally mounted UHF/acoustic sensors? Please confirm the sensor type, coupling method, and whether GIS spacers/dielectric windows are available for UHF coupling.",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Channel-to-sensor architecture",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "618 sensors across 12 bays (~51 per bay) implies either high channel-count acquisition units or multiplexing—this defines the quantity and model of monitoring units and the overall system cost.",
+      "question": "How many PD acquisition channels per GIS bay are required, and should all 618 sensors be continuously monitored simultaneously, or multiplexed across fewer channels per bay?",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Monitoring mode (continuous online vs. periodic)",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Continuous online monitoring needs fixed acquisition hardware, central servers, and software licenses per bay, whereas periodic monitoring uses shared portable units—this fundamentally changes the BOQ structure and quantities.",
+      "question": "Do you require permanently installed continuous online PD monitoring, or a periodic/portable scanning solution for these 12 bays?",
+      "priority": "High",
+      "owner": "Customer/Asset Owner",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    },
+    {
+      "project_id": "00796547",
+      "missing_item": "Communication and integration requirements",
+      "scenario_id": "GIS_PD_001",
+      "why_it_matters": "Protocol and software/integration scope determine gateway hardware, licensing, and engineering effort that must be itemized in the BOQ.",
+      "question": "What are the required communication protocols and integration targets (e.g., IEC 61850, DNP3, Modbus, SCADA/asset management) and is a centralized PD analysis/expert software platform needed?",
+      "priority": "Medium",
+      "owner": "Customer/System Integrator",
+      "status": "Open",
+      "notes": "Suggested by LLM review."
+    }
+  ]
+}

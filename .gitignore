@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+outputs/
+.DS_Store
+
+# Local credentials (LLM + Tavily) - never commit
+qualitrol_core/llm_config.local.json
+qualitrol_core/tavily_config.local.json
+*.local.json

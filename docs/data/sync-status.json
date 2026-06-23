@@ -1,0 +1,32 @@
+{
+  "salesforce": {
+    "connected": true,
+    "endpoint": "https://mock.salesforce.com/api/cases",
+    "mode": "mock",
+    "lastSyncAt": "2026-06-23T05:37:42.087306Z",
+    "case": {
+      "caseId": "SF-DEMO",
+      "subject": "Qualitrol monitoring quotation",
+      "account": "Demo Utility",
+      "priority": "High",
+      "customerTier": "Strategic",
+      "region": "APAC"
+    }
+  },
+  "docgen": {
+    "templateReady": true,
+    "templatePath": "python-docx (programmatic)",
+    "engine": "python-docx",
+    "conditionalRules": [
+      {
+        "rule": "Append Open Clarification Questions section when missing info exists",
+        "active": true
+      },
+      {
+        "rule": "Include BOQ line items with pricing when available",
+        "active": true
+      }
+    ]
+  },
+  "checkedAt": "2026-06-23T05:37:42.087320Z"
+}
