@@ -972,15 +972,22 @@
         </div>
 
         <div id="missing-info-panel" class="hidden missing-info-panel">
-          <div class="missing-info-head">
+          <div class="missing-info-head" style="cursor:pointer;user-select:none;" onclick="toggleCollapsible('missing-info-body','missing-info-chevron')">
             <div>
               <p class="section-kicker" style="margin-bottom:4px;">Clarifications</p>
               <h3 class="section-heading" style="font-size:18px;">Missing Information Questions</h3>
               <p class="section-copy" style="margin-top:4px;">Items to confirm with the customer before finalizing the BOQ.</p>
             </div>
-            <span class="badge" id="missing-info-count">0 open</span>
+            <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+              <span class="badge" id="missing-info-count">0 open</span>
+              <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('missing-info-body','missing-info-chevron')">
+                <span id="missing-info-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span> 展开
+              </button>
+            </div>
           </div>
-          <div id="missing-info-list" class="missing-info-list"></div>
+          <div id="missing-info-body" style="display:none;">
+            <div id="missing-info-list" class="missing-info-list"></div>
+          </div>
         </div>
 
         <div class="review-grid" style="margin-top: 18px;">
@@ -1021,10 +1028,13 @@
         </div>
 
         <div class="card" style="margin-top: 18px;">
-          <div class="card-head">
+          <div class="card-head" style="cursor:pointer;user-select:none;" onclick="toggleCollapsible('requirements-list','requirements-chevron')">
             <h3 class="section-heading">Requirement Evidence List</h3>
+            <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('requirements-list','requirements-chevron')">
+              <span id="requirements-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span> 展开
+            </button>
           </div>
-          <div id="requirements-list" class="requirements-list">
+          <div id="requirements-list" class="requirements-list" style="display:none;">
             <div style="text-align:center; color: var(--muted);">No requirements loaded yet</div>
           </div>
         </div>
@@ -1143,9 +1153,7 @@
     </main>
   </div>
 
-  <footer class="app-footer">
-    Qualitrol Quotation Agent · GitHub Pages static demo
-  </footer>
+  <footer class="app-footer"></footer>
 
 
   <div style="background:#fff6df;border-bottom:1px solid #f0dca0;color:#9a5b00;padding:10px 32px;text-align:center;font-size:14px;">

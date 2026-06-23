@@ -671,3 +671,19 @@
   loadSampleBoq();
   loadSyncStatus();
 })();
+
+function toggleCollapsible(bodyId, chevronId) {
+  const body = document.getElementById(bodyId);
+  const chevron = document.getElementById(chevronId);
+  const btn = chevron && chevron.closest("button");
+  if (!body) return;
+  const isOpen = body.style.display !== "none";
+  body.style.display = isOpen ? "none" : "";
+  if (chevron) chevron.style.transform = isOpen ? "rotate(0deg)" : "rotate(-180deg)";
+  if (btn) {
+    const label = btn.querySelector("span + text") || btn.lastChild;
+    btn.childNodes.forEach((n) => {
+      if (n.nodeType === 3) n.textContent = isOpen ? " 展开" : " 收起";
+    });
+  }
+}
