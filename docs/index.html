@@ -980,8 +980,8 @@
             </div>
             <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
               <span class="badge" id="missing-info-count">0 open</span>
-              <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('missing-info-body','missing-info-chevron')">
-                <span id="missing-info-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span> 展开
+              <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('missing-info-body','missing-info-chevron','missing-info-label')">
+                <span id="missing-info-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span><span id="missing-info-label">Expand</span>
               </button>
             </div>
           </div>
@@ -1030,8 +1030,8 @@
         <div class="card" style="margin-top: 18px;">
           <div class="card-head" style="cursor:pointer;user-select:none;" onclick="toggleCollapsible('requirements-list','requirements-chevron')">
             <h3 class="section-heading">Requirement Evidence List</h3>
-            <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('requirements-list','requirements-chevron')">
-              <span id="requirements-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span> 展开
+            <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('requirements-list','requirements-chevron','requirements-label')">
+              <span id="requirements-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span><span id="requirements-label">Expand</span>
             </button>
           </div>
           <div id="requirements-list" class="requirements-list" style="display:none;">
