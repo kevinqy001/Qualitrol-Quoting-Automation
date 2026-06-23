@@ -534,6 +534,7 @@ def run(
     project_dir: str | Path,
     project_id: str | None = None,
     output_dir: str | Path | None = None,
+    sld_filenames: set[str] | None = None,
 ) -> dict:
     project_dir = Path(project_dir)
     if not project_dir.exists():
@@ -542,7 +543,7 @@ def run(
     output_dir = Path(output_dir) if output_dir else config.OUTPUT_DIR / project_id
 
     dp = load_data_package()
-    docs = parse_project_folder(project_dir)
+    docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
 
     corpus_lower = "\n".join(d.full_text for d in docs).lower()
     evidence = extract_evidence(docs, dp, project_id)

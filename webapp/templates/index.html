@@ -389,6 +389,58 @@
       transform: translateY(-4px);
     }
 
+    .drop-zone-sld {
+      border-color: #bfcfde;
+      background:
+        linear-gradient(180deg, rgb(255 255 255 / 0.92), rgb(244 249 255 / 0.78)),
+        radial-gradient(circle at center, rgb(29 130 237 / 0.08), transparent 48%);
+    }
+
+    .drop-zone-sld svg {
+      color: #3b82f6;
+    }
+
+    .drop-zone-sld:hover {
+      border-color: #3b82f6;
+      box-shadow: 0 18px 40px rgb(59 130 246 / 0.10);
+    }
+
+    .drop-zone-sld.dz-has-files {
+      border-color: #3b82f6;
+      background:
+        linear-gradient(180deg, rgb(239 246 255 / 0.95), rgb(219 234 254 / 0.60));
+    }
+
+    .drop-zone-docs.dz-has-files {
+      border-color: var(--ralliant-orange);
+      background:
+        linear-gradient(180deg, rgb(255 248 244 / 0.95), rgb(254 235 224 / 0.60));
+    }
+
+    .file-pill-sld-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #dbeafe;
+      color: #1d4ed8;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .file-pill-doc-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #fde8d8;
+      color: #9a3412;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
     .drop-title {
       margin: 0;
       font-size: 18px;
@@ -865,13 +917,32 @@
     <main class="content-main">
       <section id="tab-ingestion" class="tab-panel active">
         <div class="two-column">
-          <div id="drop-zone" class="drop-zone">
-            <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-            </svg>
-            <p class="drop-title">Drop a customer requirement file here</p>
-            <p class="drop-subtitle">or browse one or multiple files · PDF, DOCX, XLSX/XLSM, PPTX, EML, MSG, CSV, TXT, MD</p>
-            <input type="file" id="file-input" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xlsm,.pptx,.eml,.msg,.csv,.txt,.md" />
+          <!-- Left: two upload zones side-by-side -->
+          <div style="display:flex; gap:14px; min-width:0;">
+            <!-- Zone A: project documents -->
+            <div style="flex:1.4; min-width:0;">
+              <p class="field-label" style="margin-bottom:8px;">Project Documents</p>
+              <div id="drop-zone-docs" class="drop-zone" style="height:160px;">
+                <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true" style="width:28px;height:28px;">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p class="drop-title" style="font-size:13px;">Spec · Email · BOQ</p>
+                <p class="drop-subtitle" style="font-size:11px;">PDF · DOCX · XLSX · PPTX · EML · TXT</p>
+                <input type="file" id="file-input-docs" class="hidden" multiple accept=".pdf,.docx,.xlsx,.xlsm,.pptx,.eml,.msg,.csv,.txt,.md" />
+              </div>
+            </div>
+            <!-- Zone B: circuit diagram / SLD -->
+            <div style="flex:1; min-width:0;">
+              <p class="field-label" style="margin-bottom:8px;">Circuit Diagram / SLD <span style="font-weight:400;color:var(--muted);">(optional)</span></p>
+              <div id="drop-zone-sld" class="drop-zone drop-zone-sld" style="height:160px;">
+                <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true" style="width:28px;height:28px;">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" />
+                </svg>
+                <p class="drop-title" style="font-size:13px;">Single Line Diagram</p>
+                <p class="drop-subtitle" style="font-size:11px;">PDF only · used for asset quantity extraction</p>
+                <input type="file" id="file-input-sld" class="hidden" multiple accept=".pdf" />
+              </div>
+            </div>
           </div>
 
           <aside class="signal-card">

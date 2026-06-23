@@ -202,8 +202,18 @@ def _parse_text(path: Path) -> list[DocSegment]:
     return segments
 
 
-def parse_document(path: str | Path) -> Optional[ParsedDocument]:
-    """Parse a single file into a ParsedDocument, or None if unsupported/empty."""
+def parse_document(
+    path: str | Path,
+    doc_type_override: Optional[str] = None,
+) -> Optional[ParsedDocument]:
+    """Parse a single file into a ParsedDocument, or None if unsupported/empty.
+
+    Args:
+        path: Path to the file.
+        doc_type_override: When provided, skips ``infer_doc_type`` and uses this
+            value directly.  Useful when the caller already knows the role of the
+            file (e.g. the user explicitly dropped it into the SLD upload zone).
+    """
     path = Path(path)
     ext = path.suffix.lower()
     if ext not in config.SUPPORTED_DOC_EXTENSIONS:
@@ -230,7 +240,7 @@ def parse_document(path: str | Path) -> Optional[ParsedDocument]:
     if not segments:
         return None
 
-    doc_type = infer_doc_type(path.name, segments[0].text if segments else "")
+    doc_type = doc_type_override or infer_doc_type(path.name, segments[0].text if segments else "")
     return ParsedDocument(
         file_name=path.name,
         file_path=str(path),
@@ -239,13 +249,25 @@ def parse_document(path: str | Path) -> Optional[ParsedDocument]:
     )
 
 
-def parse_project_folder(folder: str | Path) -> list[ParsedDocument]:
-    """Parse every supported document in a customer submission folder."""
+def parse_project_folder(
+    folder: str | Path,
+    sld_filenames: set[str] | None = None,
+) -> list[ParsedDocument]:
+    """Parse every supported document in a customer submission folder.
+
+    Args:
+        folder: Path to the folder containing uploaded files.
+        sld_filenames: Optional set of bare filenames (no path) that should be
+            forced to ``"Drawing / SLD"`` doc_type, overriding ``infer_doc_type``.
+            Populated from the SLD upload zone on the frontend.
+    """
     folder = Path(folder)
+    sld_set = {n.lower() for n in (sld_filenames or set())}
     docs: list[ParsedDocument] = []
     for file in sorted(folder.rglob("*")):
         if file.is_file() and file.suffix.lower() in config.SUPPORTED_DOC_EXTENSIONS:
-            parsed = parse_document(file)
+            override = "Drawing / SLD" if file.name.lower() in sld_set else None
+            parsed = parse_document(file, doc_type_override=override)
             if parsed:
                 docs.append(parsed)
     return docs

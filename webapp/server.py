@@ -23,7 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+import json as _json
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -274,10 +276,15 @@ def build_extraction(
     return extraction, confidence
 
 
-async def _run_pipelines(upload_dir: Path, project_id: str, output_dir: Path):
+async def _run_pipelines(
+    upload_dir: Path,
+    project_id: str,
+    output_dir: Path,
+    sld_filenames: set[str] | None = None,
+):
     """Run Step 1 then Step 2 off the event loop (they may call the LLM)."""
     step1 = await asyncio.to_thread(
-        step1_pipeline.run, upload_dir, project_id, output_dir
+        step1_pipeline.run, upload_dir, project_id, output_dir, sld_filenames
     )
     step1_path = output_dir / "step1_extract_info.json"
     step2 = await asyncio.to_thread(step2_pipeline.run, step1_path, output_dir)
@@ -303,14 +310,33 @@ async def health_check():
 @app.post("/api/v1/ingest")
 async def ingest_document(file: UploadFile = File(...)):
     """Single-file ingestion (kept for compatibility); delegates to batch."""
-    return await ingest_documents([file])
+    return await ingest_documents([file], sld_filenames="")
 
 
 @app.post("/api/v1/ingest/batch")
-async def ingest_documents(files: list[UploadFile] = File(...)):
-    """Ingest uploaded files and run the full Step 1 + Step 2 pipeline on them."""
+async def ingest_documents(
+    files: list[UploadFile] = File(...),
+    sld_filenames: str = Form(""),
+):
+    """Ingest uploaded files and run the full Step 1 + Step 2 pipeline on them.
+
+    Args:
+        files: All uploaded files (project documents + SLD diagrams combined).
+        sld_filenames: JSON-encoded list of filenames that came from the SLD
+            upload zone.  Those files will have their ``doc_type`` forced to
+            ``"Drawing / SLD"`` regardless of filename heuristics.
+    """
     if not files:
         raise HTTPException(400, "No files uploaded.")
+
+    # Parse the SLD filename list sent by the frontend.
+    sld_set: set[str] = set()
+    if sld_filenames:
+        try:
+            names = _json.loads(sld_filenames)
+            sld_set = {Path(n).name.lower() for n in names if n}
+        except Exception:
+            pass
 
     started = time.perf_counter()
     project_id = f"WEB-{uuid.uuid4().hex[:8].upper()}"
@@ -336,7 +362,9 @@ async def ingest_documents(files: list[UploadFile] = File(...)):
             skipped.append(safe_name)
 
     try:
-        step1, step2 = await _run_pipelines(upload_dir, project_id, output_dir)
+        step1, step2 = await _run_pipelines(
+            upload_dir, project_id, output_dir, sld_filenames=sld_set or None
+        )
     except Exception as exc:  # surface a clean error to the UI
         raise HTTPException(500, f"Pipeline failed: {exc}") from exc
 

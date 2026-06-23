@@ -109,93 +109,155 @@
   );
 
   // ── Tab 1: Multi-Modal Ingestion ───────────────────────────────────────
-  const dropZone = $("#drop-zone");
-  const fileInput = $("#file-input");
+  const dropZoneDocs = $("#drop-zone-docs");
+  const dropZoneSld  = $("#drop-zone-sld");
+  const fileInputDocs = $("#file-input-docs");
+  const fileInputSld  = $("#file-input-sld");
   const startAnalysisBtn = $("#btn-start-analysis");
   const cancelAnalysisBtn = $("#btn-cancel-analysis");
-  let selectedFiles = [];
+
+  // Each entry: { file: File, zone: "doc" | "sld" }
+  let selectedDocFiles = [];   // project documents
+  let selectedSldFiles = [];   // circuit diagrams / SLDs
   let activeAnalysisController = null;
 
-  dropZone.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files.length) selectFiles(Array.from(fileInput.files));
-  });
+  function allSelectedFiles() {
+    return [
+      ...selectedDocFiles.map((f) => ({ file: f, zone: "doc" })),
+      ...selectedSldFiles.map((f) => ({ file: f, zone: "sld" })),
+    ];
+  }
 
+  function totalSelectedCount() {
+    return selectedDocFiles.length + selectedSldFiles.length;
+  }
+
+  // ---- Zone: Docs ----
+  dropZoneDocs.addEventListener("click", () => fileInputDocs.click());
+  fileInputDocs.addEventListener("change", () => {
+    if (fileInputDocs.files.length) addDocFiles(Array.from(fileInputDocs.files));
+  });
   ["dragover", "dragenter"].forEach((evt) =>
-    dropZone.addEventListener(evt, (e) => {
-      e.preventDefault();
-      dropZone.classList.add("border-brand-500", "bg-brand-50/50");
-    })
+    dropZoneDocs.addEventListener(evt, (e) => { e.preventDefault(); dropZoneDocs.classList.add("dz-hover"); })
   );
   ["dragleave", "drop"].forEach((evt) =>
-    dropZone.addEventListener(evt, (e) => {
-      e.preventDefault();
-      dropZone.classList.remove("border-brand-500", "bg-brand-50/50");
-    })
+    dropZoneDocs.addEventListener(evt, (e) => { e.preventDefault(); dropZoneDocs.classList.remove("dz-hover"); })
   );
-  dropZone.addEventListener("drop", (e) => {
-    if (e.dataTransfer.files.length) selectFiles(Array.from(e.dataTransfer.files));
+  dropZoneDocs.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files.length) addDocFiles(Array.from(e.dataTransfer.files));
   });
 
+  // ---- Zone: SLD ----
+  dropZoneSld.addEventListener("click", () => fileInputSld.click());
+  fileInputSld.addEventListener("change", () => {
+    if (fileInputSld.files.length) addSldFiles(Array.from(fileInputSld.files));
+  });
+  ["dragover", "dragenter"].forEach((evt) =>
+    dropZoneSld.addEventListener(evt, (e) => { e.preventDefault(); dropZoneSld.classList.add("dz-hover"); })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropZoneSld.addEventListener(evt, (e) => { e.preventDefault(); dropZoneSld.classList.remove("dz-hover"); })
+  );
+  dropZoneSld.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files.length) addSldFiles(Array.from(e.dataTransfer.files));
+  });
+
+  function addDocFiles(files) {
+    const existing = new Set(selectedDocFiles.map((f) => f.name));
+    files.forEach((f) => { if (!existing.has(f.name)) selectedDocFiles.push(f); });
+    dropZoneDocs.classList.toggle("dz-has-files", selectedDocFiles.length > 0);
+    afterFileChange();
+    fileInputDocs.value = "";
+  }
+
+  function addSldFiles(files) {
+    const existing = new Set(selectedSldFiles.map((f) => f.name));
+    files.forEach((f) => { if (!existing.has(f.name)) selectedSldFiles.push(f); });
+    dropZoneSld.classList.toggle("dz-has-files", selectedSldFiles.length > 0);
+    afterFileChange();
+    fileInputSld.value = "";
+  }
+
+  function afterFileChange() {
+    renderSelectedFiles();
+    const total = totalSelectedCount();
+    if (total > 0) {
+      const sldNote = selectedSldFiles.length
+        ? ` · ${selectedSldFiles.length} SLD diagram(s)` : "";
+      $("#selected-file-meta").textContent =
+        `${total} file(s), ${formatBytes(totalSelectedBytes())} total${sldNote} · ready for analysis`;
+    }
+    $("#upload-result").classList.add("hidden");
+  }
+
   startAnalysisBtn.addEventListener("click", () => {
-    if (selectedFiles.length) analyzeSelectedFiles();
+    if (totalSelectedCount()) analyzeSelectedFiles();
   });
 
   cancelAnalysisBtn.addEventListener("click", () => {
-    if (activeAnalysisController) {
-      activeAnalysisController.abort();
-    }
+    if (activeAnalysisController) activeAnalysisController.abort();
   });
-
-  function selectFiles(files) {
-    selectedFiles = files;
-    renderSelectedFiles();
-    $("#selected-file-meta").textContent =
-      `${selectedFiles.length} file(s), ${formatBytes(totalSelectedBytes())} total · ready for manual LLM analysis`;
-    startAnalysisBtn.disabled = false;
-    cancelAnalysisBtn.disabled = true;
-    $("#upload-result").classList.add("hidden");
-    fileInput.value = "";
-  }
 
   function renderSelectedFiles() {
     const list = $("#selected-files-list");
-    if (!selectedFiles.length) {
+    const all = allSelectedFiles();
+
+    if (!all.length) {
       $("#selected-file-name").textContent = "No file selected yet";
-      $("#selected-file-meta").textContent = "Choose one or more documents first, then click Start LLM Analysis.";
+      $("#selected-file-meta").textContent = "Choose documents and/or a circuit diagram, then click Start LLM Analysis.";
       list.innerHTML = "";
       startAnalysisBtn.disabled = true;
       cancelAnalysisBtn.disabled = true;
       return;
     }
 
+    const total = totalSelectedCount();
     $("#selected-file-name").textContent =
-      selectedFiles.length === 1 ? selectedFiles[0].name : `${selectedFiles.length} files selected`;
-    list.innerHTML = selectedFiles
-      .map((file, idx) => `
-        <div class="file-pill">
-          <div class="file-pill-main">
-            <p class="file-pill-name">${escapeHtml(file.name)}</p>
-            <p class="file-pill-meta">${formatBytes(file.size)} · ${escapeHtml(file.type || "unknown type")}</p>
-          </div>
-          <button class="file-pill-remove" type="button" data-remove-file="${idx}" aria-label="Remove ${escapeHtml(file.name)}">×</button>
-        </div>
-      `)
+      total === 1 ? all[0].file.name : `${total} files selected`;
+
+    list.innerHTML = all
+      .map(({ file, zone }, idx) => {
+        const badge = zone === "sld"
+          ? `<span class="file-pill-sld-badge">SLD</span>`
+          : `<span class="file-pill-doc-badge">DOC</span>`;
+        return `
+          <div class="file-pill">
+            <div class="file-pill-main">
+              <p class="file-pill-name">${escapeHtml(file.name)}${badge}</p>
+              <p class="file-pill-meta">${formatBytes(file.size)} · ${escapeHtml(file.type || "unknown type")}</p>
+            </div>
+            <button class="file-pill-remove" type="button" data-remove-file="${idx}" data-zone="${zone}" aria-label="Remove ${escapeHtml(file.name)}">×</button>
+          </div>`;
+      })
       .join("");
+
     list.querySelectorAll("[data-remove-file]").forEach((btn) => {
       btn.addEventListener("click", (event) => {
         const idx = Number(event.currentTarget.dataset.removeFile);
-        selectedFiles.splice(idx, 1);
-        renderSelectedFiles();
+        const zone = event.currentTarget.dataset.zone;
+        const docCount = selectedDocFiles.length;
+        if (zone === "sld") {
+          selectedSldFiles.splice(idx - docCount, 1);
+          dropZoneSld.classList.toggle("dz-has-files", selectedSldFiles.length > 0);
+        } else {
+          selectedDocFiles.splice(idx, 1);
+          dropZoneDocs.classList.toggle("dz-has-files", selectedDocFiles.length > 0);
+        }
+        afterFileChange();
       });
     });
+
+    startAnalysisBtn.disabled = false;
   }
 
   function setAnalysisRunning(isRunning) {
-    startAnalysisBtn.disabled = isRunning || !selectedFiles.length;
+    const total = totalSelectedCount();
+    startAnalysisBtn.disabled = isRunning || total === 0;
     cancelAnalysisBtn.disabled = !isRunning;
-    const fileLabel = selectedFiles.length > 1 ? `${selectedFiles.length} Files` : "File";
-    startAnalysisBtn.textContent = isRunning ? `Analyzing ${fileLabel}...` : `Start LLM Analysis${selectedFiles.length > 1 ? ` (${selectedFiles.length})` : ""}`;
+    const fileLabel = total > 1 ? `${total} Files` : "File";
+    startAnalysisBtn.textContent = isRunning
+      ? `Analyzing ${fileLabel}...`
+      : `Start LLM Analysis${total > 1 ? ` (${total})` : ""}`;
     cancelAnalysisBtn.textContent = isRunning ? "Terminate Current Analysis" : "No Active Analysis";
   }
 
@@ -214,7 +276,10 @@
     activeAnalysisController = new AbortController();
 
     const formData = new FormData();
-    selectedFiles.forEach((file) => formData.append("files", file));
+    selectedDocFiles.forEach((file) => formData.append("files", file));
+    selectedSldFiles.forEach((file) => formData.append("files", file));
+    // Tell the backend which filenames came from the SLD zone.
+    formData.append("sld_filenames", JSON.stringify(selectedSldFiles.map((f) => f.name)));
 
     try {
       const res = await fetch(`${API}/ingest/batch`, {
@@ -225,10 +290,11 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
+      const total = totalSelectedCount();
       $("#upload-filename").textContent = data.fileName;
       const extraction = data.extraction || data.boq;
       $("#upload-meta").textContent =
-        `${formatBytes(data.fileSizeBytes)} · ${data.fileCount || 1} file(s) · ingested ${new Date(data.ingestedAt).toLocaleTimeString()} · mode: ${extraction.extractionMode || "auto"}`;
+        `${formatBytes(data.fileSizeBytes)} · ${data.fileCount || total} file(s) · ingested ${new Date(data.ingestedAt).toLocaleTimeString()} · mode: ${extraction.extractionMode || "auto"}`;
       $("#stat-items").textContent = (extraction.requirements || extraction.lineItems || []).length;
       $("#stat-confidence").textContent = Math.round(data.confidence * 100) + "%";
       $("#stat-time").textContent = (data.processingTimeMs / 1000).toFixed(1) + "s";
@@ -239,7 +305,7 @@
     } catch (err) {
       if (err.name === "AbortError") {
         $("#selected-file-meta").textContent =
-          `${selectedFiles.length} file(s), ${formatBytes(totalSelectedBytes())} total · analysis terminated by user`;
+          `${totalSelectedCount()} file(s), ${formatBytes(totalSelectedBytes())} total · analysis terminated by user`;
       } else {
         alert("Analysis failed: " + err.message);
       }
@@ -251,7 +317,7 @@
   }
 
   function totalSelectedBytes() {
-    return selectedFiles.reduce((sum, file) => sum + file.size, 0);
+    return [...selectedDocFiles, ...selectedSldFiles].reduce((sum, f) => sum + f.size, 0);
   }
 
   function formatBytes(bytes) {
