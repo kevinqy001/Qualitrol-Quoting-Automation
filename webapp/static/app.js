@@ -474,7 +474,7 @@
         </article>`;
       })
       .join("");
-    panel.classList.remove("hidden");
+    // panel.classList.remove("hidden");  // section hidden per UI decision
   }
 
   function renderRequirements(requirements) {

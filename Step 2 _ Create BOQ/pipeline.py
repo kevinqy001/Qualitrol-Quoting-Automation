@@ -67,7 +67,11 @@ def _asset_counts(drawing_assets: list[dict]) -> dict[str, float]:
         qty = asset.get("quantity") or 0
         if qty:
             atype = asset.get("asset_type", "")
-            counts[atype] = max(counts.get(atype, 0.0), float(qty))
+            # Sum across rows of the same type. The VLM path emits one row per
+            # asset (quantity=1 each); the text path emits one grouped row per
+            # (status, voltage) with quantity=count. Summing yields the correct
+            # total in both cases (max would collapse VLM rows to 1).
+            counts[atype] = counts.get(atype, 0.0) + float(qty)
     return counts
 
 

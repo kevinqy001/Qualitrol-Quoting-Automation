@@ -394,7 +394,8 @@ def extract_sld_assets_vlm(
         "drawing_area (zone label, e.g. '400kV GIS Indoor'), "
         "status (from list above), quantity (integer, default 1), "
         "evidence (short description of what you see on the drawing).\n\n"
-        "Respond with STRICT JSON only."
+        "Keep each 'evidence' value under 10 words so the full JSON fits in the "
+        "response. Respond with STRICT JSON only — no markdown, no commentary."
     )
     user = (
         "Please analyse this Single Line Diagram and extract all identifiable electrical "
@@ -409,7 +410,9 @@ def extract_sld_assets_vlm(
         '"drawing_area":"...","status":"...","quantity":1,"evidence":"..."}]}'
     )
 
-    data = client.complete_json_with_image(system, user, image_b64, max_tokens=4096)
+    # Real substation SLDs contain dozens of assets; 4096 tokens truncates the
+    # JSON mid-array (unrecoverable), so give the vision call ample room.
+    data = client.complete_json_with_image(system, user, image_b64, max_tokens=8192)
     if not isinstance(data, dict) or "assets" not in data:
         return None
 

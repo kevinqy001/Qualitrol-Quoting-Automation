@@ -364,8 +364,10 @@ def extract_requirements(
     asset_counts: dict[str, float] = {}
     for asset in drawing_assets:
         if asset.quantity:
-            asset_counts[asset.asset_type] = max(
-                asset_counts.get(asset.asset_type, 0.0), asset.quantity
+            # Sum across rows of the same type (VLM emits one row per asset with
+            # quantity=1; text path emits grouped rows with quantity=count).
+            asset_counts[asset.asset_type] = (
+                asset_counts.get(asset.asset_type, 0.0) + asset.quantity
             )
 
     def _count_from_assets(metric_id: str):

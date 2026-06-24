@@ -16,14 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import sys
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 
 import json as _json
+
+logging.basicConfig(level=logging.INFO)
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -366,6 +370,7 @@ async def ingest_documents(
             upload_dir, project_id, output_dir, sld_filenames=sld_set or None
         )
     except Exception as exc:  # surface a clean error to the UI
+        logging.error("Pipeline failed for project %s:\n%s", project_id, traceback.format_exc())
         raise HTTPException(500, f"Pipeline failed: {exc}") from exc
 
     preview_text = _preview_for_folder(upload_dir)
