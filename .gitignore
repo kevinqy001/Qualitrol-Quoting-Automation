@@ -9,3 +9,6 @@ outputs/
 qualitrol_core/llm_config.local.json
 qualitrol_core/tavily_config.local.json
 *.local.json
+
+# Customer sample submissions (confidential / large) - do not commit
+Gemba Samples/
