@@ -36,7 +36,10 @@ from qualitrol_core.document_parser import (  # noqa: E402
     ParsedDocument,
     parse_project_folder,
 )
-from qualitrol_core.drawing_assets import extract_drawing_assets  # noqa: E402
+from qualitrol_core.drawing_assets import (  # noqa: E402
+    augment_docs_with_sld_text,
+    extract_drawing_assets,
+)
 from qualitrol_core.schemas import (  # noqa: E402
     DrawingAsset,
     Evidence,
@@ -547,13 +550,21 @@ def run(
     dp = load_data_package()
     docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
 
+    client = llm.get_client()
+    extra_rules = load_extraction_rules()
+
+    # --- P1-A: when a project supplies only drawings (no prose spec), use the
+    #     VLM to read the drawing's labels/titles and inject them as text so the
+    #     text-driven scenario detection below has scenario keywords to match. ---
+    sld_text_augmented = 0
+    if client.available:
+        sld_text_augmented = augment_docs_with_sld_text(docs, client)
+
     corpus_lower = "\n".join(d.full_text for d in docs).lower()
     evidence = extract_evidence(docs, dp, project_id)
     detected = detect_scenarios(evidence, dp, corpus_lower)
 
     # --- LLM augmentation: refine scenarios (precision) before requirements ---
-    client = llm.get_client()
-    extra_rules = load_extraction_rules()
     llm_used = False
     llm_dropped: list[dict] = []
     if client.available:
@@ -591,6 +602,7 @@ def run(
             "model": config.SETTINGS.llm_deployment if client.available else None,
             "extra_rules_applied": bool(extra_rules),
             "scenarios_dropped_by_llm": llm_dropped,
+            "sld_text_augmented_docs": sld_text_augmented,
         },
         "documents": [
             {"file_name": d.file_name, "doc_type": d.doc_type,

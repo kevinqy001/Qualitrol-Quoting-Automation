@@ -34,10 +34,35 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "sensor_count": ["Sensor", "PD Sensor"],
     "bushing_count": ["Bushing"],
     "accessory_count": ["Accessory", "Sensor"],
-    "pcc_count": ["PCC", "Bus", "Feeder"],
-    "measurement_point_count": ["Bus", "PCC", "Measurement Point"],
+    # Feeders are the primary sizing basis for DFR/PMU/PQ recorders (1 DAU per
+    # feeder-group); buses / PCCs are the fallback when feeders aren't extracted.
+    "pcc_count": ["Feeder", "PCC", "Bus"],
+    "measurement_point_count": ["Feeder", "Bus", "PCC", "Measurement Point"],
+    "feeder_count": ["Feeder"],
     "channel_count": ["Channel"],
 }
+
+# --------------------------------------------------------------------------- #
+# Quantity sizing (P1-B): recorder/DAU sizing and fixed-quantity families.
+# --------------------------------------------------------------------------- #
+# Qualitrol IDM+ DAUs are sized per feeder group: each unit carries a fixed
+# analogue-channel budget, and the real BOQ allocates ~12 analogue channels per
+# feeder (see quote note "12 analogue channels for each feeder"), so one
+# 36-analogue DAU typically covers ~3 feeders. These are editable assumptions.
+CHANNELS_PER_FEEDER = 12
+CHANNELS_PER_DAU = 36
+FEEDERS_PER_DAU = max(1, CHANNELS_PER_DAU // CHANNELS_PER_FEEDER)  # = 3
+
+# count_field substrings that denote a system-level item quoted once per
+# substation/system (monitoring software, central gateway, server, licences)
+# rather than scaled by a drawing asset count.
+FIXED_ONE_COUNT_FIELD_HINTS = (
+    "tag_count", "gateway", "site_count", "license", "licence",
+    "server", "user_count", "software", "platform",
+)
+
+# count fields that should be sized by the recorder/DAU formula (feeder-based).
+DAU_SIZED_COUNT_FIELDS = {"channel_count", "feeder_count"}
 
 # Count metric -> drawing asset type(s); counts are taken from the drawing
 # asset list rather than from unreliable numbers floating in spec text.

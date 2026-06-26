@@ -439,7 +439,9 @@ def _extract_from_sld_vlm(
     if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
         return []
 
-    image_b64 = _render_pdf_page_to_b64(doc.file_path)
+    # Render at a modest DPI: full-size SLDs at 200 dpi exceed the vision
+    # model's max image dimensions and the call fails.
+    image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=140)
     if not image_b64:
         return []
 
@@ -447,6 +449,59 @@ def _extract_from_sld_vlm(
         client, image_b64, doc.file_name, project_id
     )
     return result or []
+
+
+def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
+    """Inject VLM-read drawing text into sparse drawing-only corpora (P1-A).
+
+    Scenario detection is text-driven, so a project that supplies only SLD/BLD
+    drawings (no prose specification) yields no scenarios. When the corpus has
+    little prose text, render each drawing's first page and ask the VLM to
+    transcribe its labels/titles, then append that text as a new segment on the
+    drawing document so ``extract_evidence`` can match scenario keywords.
+
+    Mutates ``docs`` in place. Returns the number of documents augmented.
+    Safe no-op when the client is unavailable or PyMuPDF is missing.
+    """
+    from .document_parser import DocSegment
+
+    if client is None or not getattr(client, "available", False):
+        return 0
+
+    # Only act when the corpus lacks a real prose specification / email — this
+    # targets the drawings-only failure case without adding cost elsewhere.
+    # (Drawing/BLD "Supporting" text doesn't count: a busbar diagram with a few
+    # hundred chars of notes is not a specification.)
+    PROSE_THRESHOLD = 500
+    prose_chars = sum(
+        len(d.full_text)
+        for d in docs
+        if d.doc_type in ("Project Specification", "Raw Email")
+    )
+    if prose_chars >= PROSE_THRESHOLD:
+        return 0
+
+    from . import llm_extract
+
+    augmented = 0
+    for doc in docs:
+        if doc.doc_type != "Drawing / SLD":
+            continue
+        if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
+            continue
+        # Render at a modest DPI: full-size SLDs at 200 dpi exceed the vision
+        # model's max image dimensions and the call fails.
+        image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=120)
+        if not image_b64:
+            continue
+        text = llm_extract.extract_sld_text_vlm(client, image_b64, doc.file_name)
+        if not text:
+            continue
+        doc.segments.append(
+            DocSegment(location="VLM drawing text (page 1)", text=text)
+        )
+        augmented += 1
+    return augmented
 
 
 def _merge_assets(

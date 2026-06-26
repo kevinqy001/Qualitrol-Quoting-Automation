@@ -81,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"      Q: {q['question']}")
 
     print(f"\nOutput written to: {result['_output_path']}")
+    if result.get("_boq_excel_path"):
+        print(f"BOQ Excel written to: {result['_boq_excel_path']}")
+    elif result.get("_boq_excel_error"):
+        print(f"BOQ Excel skipped: {result['_boq_excel_error']}")
     return 0
 
 

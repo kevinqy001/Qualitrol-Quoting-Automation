@@ -130,6 +130,58 @@ def _features_from_text(text: str) -> dict[str, bool]:
     return {key: any(kw in low for kw in kws) for key, kws in FEATURE_KEYWORDS.items()}
 
 
+def _overview_summary(step1: dict, step2: dict, preview_text: str) -> str:
+    """Concise, plain-language project overview.
+
+    Describes what the project is (voltage class / sector), the monitoring
+    applications detected, and which Qualitrol product categories are involved.
+    Deliberately omits clarification-question / review-status noise.
+    """
+    import re
+
+    detected = step1.get("detected_scenarios", [])
+    boq = step2.get("draft_boq", [])
+
+    # Monitoring applications (detected scenarios, strongest first).
+    apps: list[str] = []
+    seen: set[str] = set()
+    for d in sorted(detected, key=lambda x: -float(x.get("confidence", 0) or 0)):
+        name = (d.get("scenario") or "").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            apps.append(name)
+
+    # Qualitrol product categories (distinct BOQ product/family descriptions).
+    cats: list[str] = []
+    seen_c: set[str] = set()
+    for b in boq:
+        desc = (b.get("product_description") or "").strip()
+        if desc and desc.lower() not in seen_c:
+            seen_c.add(desc.lower())
+            cats.append(desc)
+
+    if not apps and not cats:
+        return (
+            "No Qualitrol monitoring scope was detected in the uploaded documents. "
+            "Upload a project specification and/or single-line diagram to extract "
+            "requirements."
+        )
+
+    kvs = [int(m) for m in re.findall(r"(\d{2,4})\s*kV", preview_text or "", re.I)]
+    voltage = f"{max(kvs)} kV " if kvs else ""
+
+    apps_str = "; ".join(apps[:6]) if apps else "general substation monitoring"
+    cats_str = "; ".join(cats[:8]) if cats else "to be confirmed"
+
+    return (
+        f"This is a {voltage}power-grid substation monitoring project "
+        f"(electric utility / transmission & distribution sector). "
+        f"Monitoring applications identified: {apps_str}. "
+        f"Qualitrol product categories involved: {cats_str} "
+        f"({len(boq)} product line(s) proposed)."
+    )
+
+
 def _preview_for_folder(folder: Path, limit: int = 6000) -> str:
     """Concatenate readable text from a parsed submission folder for the UI."""
     try:
@@ -234,17 +286,9 @@ def build_extraction(
     missing_questions = step2.get("missing_info_questions", [])
     question_count = len(missing_questions)
 
-    # --- Extraction summary ------------------------------------------------- #
-    summary_stats = step2.get("boq_summary", {})
+    # --- Extraction summary: concise plain-language project overview -------- #
     info_complete = step2.get("information_complete", False)
-    extraction_summary = (
-        f"{step2.get('decision', 'BOQ generated')}. "
-        f"BOQ lines: {summary_stats.get('total_lines', len(line_items))} "
-        f"(draft-ready={summary_stats.get('lines_draft_ready', 0)}, "
-        f"needs-review={summary_stats.get('lines_needing_review', 0)})."
-    )
-    if question_count:
-        extraction_summary += f" {question_count} clarification question(s) for customer review."
+    extraction_summary = _overview_summary(step1, step2, preview_text)
 
     detected = step1.get("detected_scenarios", [])
     if detected:
@@ -276,6 +320,16 @@ def build_extraction(
         "missingInfoQuestions": missing_questions,
         "missingInfoCount": question_count,
         "productMatching": step2.get("product_matching", []),
+        # Download URL for the generated BOQ Excel (when one exists on disk).
+        "boqExcelUrl": (
+            f"/api/v1/boq/excel/{project_id}"
+            if project_id
+            and (
+                step2.get("_boq_excel_path")
+                or (config.OUTPUT_DIR / project_id / f"BOQ-{project_id}.xlsx").exists()
+            )
+            else None
+        ),
     }
     return extraction, confidence
 
@@ -684,6 +738,79 @@ async def generate_doc():
         ),
         "generatedAt": _now(),
         "message": f"Word document assembled with {len(priced_items)} BOQ line(s).",
+    }
+
+
+@app.get("/api/v1/boq/excel/{case_id}")
+async def download_boq_excel(case_id: str):
+    """Download the generated BOQ Excel for a case (Step 2 output)."""
+    safe = Path(case_id).name
+    path = config.OUTPUT_DIR / safe / f"BOQ-{safe}.xlsx"
+    if not path.exists():
+        raise HTTPException(
+            404,
+            f"BOQ Excel for '{case_id}' not found. Re-run the analysis to "
+            "generate it.",
+        )
+    return FileResponse(
+        path=str(path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
+
+
+class BoqEditPayload(BaseModel):
+    """Manually-edited BOQ line overrides from the Edit BOQ dialog."""
+
+    lineItems: list[dict] = []
+
+
+@app.post("/api/v1/boq/excel/{case_id}/regenerate")
+async def regenerate_boq_excel(case_id: str, payload: BoqEditPayload):
+    """Re-generate the BOQ Excel after manual product-code / qty edits.
+
+    Loads the case's Step 2 output, applies the edited product code (mapped to
+    ``product_model``) and quantity per BOQ line, and rewrites the Excel using
+    the standard template so the downloadable file reflects the edits.
+    """
+    safe = Path(case_id).name
+    out_dir = config.OUTPUT_DIR / safe
+    step2_path = out_dir / "step2_create_boq.json"
+    if not step2_path.exists():
+        raise HTTPException(404, f"Step 2 output for '{case_id}' not found.")
+
+    step2 = io_utils.read_json(step2_path)
+
+    edits: dict = {}
+    for item in payload.lineItems:
+        ln = item.get("lineNumber")
+        if ln is not None:
+            edits[ln] = item
+
+    for line in step2.get("draft_boq", []):
+        edit = edits.get(line.get("boq_line"))
+        if not edit:
+            continue
+        if edit.get("productCode") is not None:
+            line["product_model"] = str(edit["productCode"]).strip()
+        if "quantity" in edit and edit["quantity"] is not None:
+            try:
+                line["quantity"] = float(edit["quantity"])
+            except (TypeError, ValueError):
+                line["quantity"] = edit["quantity"]
+
+    from qualitrol_core import boq_excel
+
+    out_path = out_dir / f"BOQ-{safe}.xlsx"
+    try:
+        await asyncio.to_thread(boq_excel.generate_boq_excel, step2, out_path)
+    except Exception as exc:  # pragma: no cover - surface a clean error
+        raise HTTPException(500, f"BOQ Excel regeneration failed: {exc}") from exc
+
+    return {
+        "status": "ok",
+        "boqExcelUrl": f"/api/v1/boq/excel/{safe}",
+        "fileName": out_path.name,
     }
 
 

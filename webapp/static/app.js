@@ -302,6 +302,18 @@
 
       renderExtraction(extraction);
       $("#upload-result").classList.remove("hidden");
+
+      // Persist this case so it can be revisited from the History panel.
+      saveCaseToHistory({
+        caseId: data.caseId,
+        fileName: data.fileName,
+        ingestedAt: data.ingestedAt || new Date().toISOString(),
+        confidence: data.confidence,
+        fileCount: data.fileCount || total,
+        fileSizeBytes: data.fileSizeBytes,
+        processingTimeMs: data.processingTimeMs,
+        extraction,
+      });
     } catch (err) {
       if (err.name === "AbortError") {
         $("#selected-file-meta").textContent =
@@ -340,17 +352,33 @@
   $("#goto-boq").addEventListener("click", () => switchTab("boq"));
 
   // ── Tab 2: BOQ Review ──────────────────────────────────────────────────
+  // The currently displayed case + a pristine snapshot of its auto-generated
+  // line items (used by the Edit BOQ "Reset" action).
+  let currentExtraction = null;
+  let originalLineItems = null;
+
   function renderExtraction(boq) {
     $("#boq-ref").textContent = boq.boqId || boq.caseReference || "BOQ";
     $("#extraction-summary").textContent =
       boq.extractionSummary || "No extraction summary returned.";
     renderFeatures(boq.features || {});
-    renderWarnings(boq.source?.warnings || []);
     renderMissingInfoQuestions(boq.missingInfoQuestions || []);
     renderRequirements(boq.requirements || []);
     if (boq.source) {
       $("#source-badge").textContent = `${boq.source.fileName || "uploaded"} · ${boq.source.fileType || "file"}`;
       $("#source-doc").textContent = boq.source.preview || "No readable source preview returned.";
+    }
+
+    // Show/hide the "Download BOQ (Excel)" button based on availability.
+    const dlBtn = $("#btn-download-boq");
+    if (dlBtn) {
+      if (!IS_STATIC && boq.boqExcelUrl) {
+        dlBtn.href = boq.boqExcelUrl;
+        dlBtn.classList.remove("hidden");
+      } else {
+        dlBtn.removeAttribute("href");
+        dlBtn.classList.add("hidden");
+      }
     }
 
     // Empty-state notice: make it obvious when an upload extracted nothing
@@ -371,16 +399,23 @@
       }
     }
 
+    // Track the active case + pristine snapshot for the Edit BOQ feature.
+    currentExtraction = boq;
+    originalLineItems = JSON.parse(JSON.stringify(boq.lineItems || []));
+    renderBoqTable(boq.lineItems || []);
+  }
+
+  function renderBoqTable(lineItems) {
     const tbody = $("#boq-table-body");
     tbody.innerHTML = "";
 
-    if (!boq.lineItems?.length) {
+    if (!lineItems || !lineItems.length) {
       tbody.innerHTML =
         `<tr><td colspan="5" style="text-align:center; color: var(--muted); padding: 32px;">No Qualitrol product lines detected</td></tr>`;
       return;
     }
 
-    boq.lineItems.forEach((item) => {
+    lineItems.forEach((item, idx) => {
       const params = item.technicalParams || {};
       const chips = Object.entries(params)
         .map(([k, v]) => {
@@ -391,12 +426,12 @@
 
       tbody.insertAdjacentHTML(
         "beforeend",
-        `<tr class="hover:bg-slate-50">
-          <td class="px-4 py-3 text-slate-400">${item.lineNumber}</td>
-          <td class="px-4 py-3 font-mono text-xs font-semibold text-brand-700">${item.productCode}</td>
-          <td class="px-4 py-3">${item.description}</td>
-          <td class="px-4 py-3 text-right font-semibold">${item.quantity} ${item.unit || ""}</td>
-          <td class="px-4 py-3">${chips || '<span class="text-slate-300">—</span>'}</td>
+        `<tr>
+          <td>${escapeHtml(String(item.lineNumber ?? idx + 1))}</td>
+          <td style="font-weight:700;color:var(--ralliant-brown);">${escapeHtml(String(item.productCode ?? ""))}</td>
+          <td>${escapeHtml(String(item.description ?? ""))}</td>
+          <td class="text-right" style="font-weight:700;">${escapeHtml(String(item.quantity ?? ""))} ${escapeHtml(item.unit || "")}</td>
+          <td>${chips || '<span style="color:var(--muted);">—</span>'}</td>
         </tr>`
       );
     });
@@ -418,19 +453,6 @@
     $("#feature-chips").innerHTML = enabled.length
       ? enabled.map(([, label]) => `<span class="badge success">${label}</span>`).join("")
       : `<span class="badge">No feature flags</span>`;
-  }
-
-  function renderWarnings(warnings) {
-    const el = $("#warnings-list");
-    if (!warnings.length) {
-      el.classList.add("hidden");
-      el.innerHTML = "";
-      return;
-    }
-    el.innerHTML = warnings
-      .map((warning) => `<div>${escapeHtml(warning)}</div>`)
-      .join("");
-    el.classList.remove("hidden");
   }
 
   function priorityClass(priority) {
@@ -541,11 +563,146 @@
     }
   }
 
-  $("#btn-reload-boq").addEventListener("click", loadSampleBoq);
-  $("#btn-approve-boq").addEventListener("click", () => {
-    const badge = $("#boq-status");
-    badge.textContent = "Reviewed";
-    badge.className = "badge bg-emerald-100 text-emerald-700";
+  // ── Edit BOQ (manual product code & qty override) ──────────────────────
+  function buildEditRows(items) {
+    const c = $("#edit-boq-list");
+    if (!c) return;
+    c.innerHTML =
+      `<table>
+        <thead><tr><th>#</th><th>Product Code</th><th>Description</th><th class="text-right">Qty</th></tr></thead>
+        <tbody>` +
+      (items || [])
+        .map(
+          (it, i) => `<tr>
+            <td>${escapeHtml(String(it.lineNumber ?? i + 1))}</td>
+            <td><input class="field-input edit-pc" data-i="${i}" value="${escapeHtml(String(it.productCode ?? ""))}" /></td>
+            <td style="color:var(--muted);font-size:13px;">${escapeHtml(String(it.description ?? ""))}</td>
+            <td class="text-right"><input class="field-input edit-qty" data-i="${i}" value="${escapeHtml(String(it.quantity ?? ""))}" style="width:90px;text-align:right;" /></td>
+          </tr>`
+        )
+        .join("") +
+      `</tbody></table>`;
+  }
+
+  function openEditBoq() {
+    const items = (currentExtraction && currentExtraction.lineItems) || [];
+    if (!items.length) {
+      alert("There are no BOQ line items to edit yet. Run an analysis first.");
+      return;
+    }
+    buildEditRows(items);
+    $("#edit-boq-modal").classList.remove("hidden");
+  }
+
+  function closeEditBoq() {
+    $("#edit-boq-modal").classList.add("hidden");
+  }
+
+  function resetEditBoq() {
+    // Restore the editor inputs to the pristine auto-generated values.
+    buildEditRows(originalLineItems || []);
+  }
+
+  function persistCurrentCaseEdits() {
+    // If this case is in local history, update its stored line items so the
+    // manual edits survive page reloads and History "View".
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (!caseId) return;
+    const list = loadHistory();
+    const rec = list.find((c) => c.caseId === caseId);
+    if (rec && rec.extraction) {
+      rec.extraction.lineItems = currentExtraction.lineItems;
+      if (currentExtraction.boqExcelUrl) {
+        rec.extraction.boqExcelUrl = currentExtraction.boqExcelUrl;
+      }
+      writeHistory(list);
+    }
+  }
+
+  function triggerDownload(url, filename) {
+    if (!url) return;
+    const a = document.createElement("a");
+    a.href = url;
+    if (filename) a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function regenerateAndDownloadBoq(items) {
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (IS_STATIC || !caseId) return;
+    const saveBtn = $("#btn-edit-save");
+    try {
+      const res = await fetch(
+        `${API}/boq/excel/${encodeURIComponent(caseId)}/regenerate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lineItems: items.map((it) => ({
+              lineNumber: it.lineNumber,
+              productCode: it.productCode,
+              quantity: it.quantity,
+            })),
+          }),
+        }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      // Reveal / refresh the download button for the edited Excel.
+      currentExtraction.boqExcelUrl = data.boqExcelUrl;
+      const dlBtn = $("#btn-download-boq");
+      if (dlBtn && data.boqExcelUrl) {
+        dlBtn.href = data.boqExcelUrl;
+        dlBtn.classList.remove("hidden");
+      }
+      persistCurrentCaseEdits();
+      // Auto-download the freshly regenerated, edited BOQ Excel.
+      triggerDownload(data.boqExcelUrl, data.fileName);
+    } catch (err) {
+      alert("Edits saved, but BOQ Excel regeneration failed: " + err.message);
+    } finally {
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save";
+      }
+    }
+  }
+
+  async function saveEditBoq() {
+    if (!currentExtraction) return closeEditBoq();
+    const items = currentExtraction.lineItems || [];
+    $("#edit-boq-list").querySelectorAll(".edit-pc").forEach((inp) => {
+      const i = Number(inp.dataset.i);
+      if (items[i]) items[i].productCode = inp.value.trim();
+    });
+    $("#edit-boq-list").querySelectorAll(".edit-qty").forEach((inp) => {
+      const i = Number(inp.dataset.i);
+      if (!items[i]) return;
+      const v = inp.value.trim();
+      const num = Number(v);
+      items[i].quantity = v !== "" && Number.isFinite(num) ? num : v;
+    });
+    renderBoqTable(items);       // refresh the Step 2 BOQ table
+    persistCurrentCaseEdits();   // persist into local history when applicable
+
+    const saveBtn = $("#btn-edit-save");
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+    closeEditBoq();              // exit back to the Step 2 page
+    // Regenerate the BOQ Excel from the edits and download it.
+    await regenerateAndDownloadBoq(items);
+  }
+
+  $("#btn-edit-boq").addEventListener("click", openEditBoq);
+  $("#btn-edit-close").addEventListener("click", closeEditBoq);
+  $("#btn-edit-reset").addEventListener("click", resetEditBoq);
+  $("#btn-edit-save").addEventListener("click", saveEditBoq);
+  $("#edit-boq-modal").addEventListener("click", (e) => {
+    if (e.target === $("#edit-boq-modal")) closeEditBoq();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#edit-boq-modal").classList.contains("hidden")) closeEditBoq();
   });
 
   async function loadPoc1Status() {
@@ -566,7 +723,7 @@
         ? "This hosted demo loads sample project 00796547. Run python app.py locally to upload documents and execute the full pipeline."
         : llmConfigured
           ? ""
-          : "No AI endpoint/key is configured yet, so uploads use deterministic local extraction for the POC harness.";
+          : "No AI endpoint/key is configured yet — uploads use deterministic local extraction. Configure an LLM key to enable full AI-powered analysis.";
       $("#supported-types").innerHTML = Object.keys(data.supportedFileTypes || {})
         .map((ext) => `<span class="badge bg-brand-100 text-brand-700">${ext}</span>`)
         .join("");
@@ -732,10 +889,165 @@
     }
   }
 
+  // ── Case History (localStorage; no backend DB yet) ─────────────────────
+  // Each completed analysis is stored so the user can revisit past scanned
+  // cases. We persist the step1+step2-derived `extraction` (requirements,
+  // BOQ line items, detected scenarios, missing-info questions, source
+  // preview) — enough to fully re-render the Requirement Review screen.
+  const HISTORY_KEY = "qualitrol_case_history_v1";
+  const HISTORY_MAX = 25;
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeHistory(arr) {
+    // Trim to the cap, then write; if the quota is exceeded, drop the oldest
+    // entries one at a time until it fits.
+    let list = arr.slice(0, HISTORY_MAX);
+    while (list.length) {
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+        return true;
+      } catch {
+        list = list.slice(0, list.length - 1); // drop oldest and retry
+      }
+    }
+    try { localStorage.removeItem(HISTORY_KEY); } catch {}
+    return false;
+  }
+
+  function saveCaseToHistory(record) {
+    const list = loadHistory().filter((c) => c.caseId !== record.caseId);
+    list.unshift(record);
+    writeHistory(list);
+    updateHistoryCount();
+  }
+
+  function deleteCase(caseId) {
+    writeHistory(loadHistory().filter((c) => c.caseId !== caseId));
+    updateHistoryCount();
+    renderHistoryList();
+  }
+
+  function clearHistory() {
+    try { localStorage.removeItem(HISTORY_KEY); } catch {}
+    updateHistoryCount();
+    renderHistoryList();
+  }
+
+  function updateHistoryCount() {
+    const n = loadHistory().length;
+    const badge = $("#history-count");
+    if (badge) badge.textContent = String(n);
+  }
+
+  function renderHistoryList() {
+    const list = loadHistory();
+    const container = $("#history-list");
+    const foot = $("#history-foot-note");
+    if (!container) return;
+
+    if (!list.length) {
+      container.innerHTML =
+        `<div class="history-empty">No analyzed cases yet. Upload documents and run an analysis to build your history.</div>`;
+      if (foot) foot.textContent = "";
+      return;
+    }
+
+    if (foot) {
+      foot.textContent = `${list.length} case(s) stored locally (max ${HISTORY_MAX}).`;
+    }
+
+    container.innerHTML = list
+      .map((c) => {
+        const ex = c.extraction || {};
+        const reqCount = (ex.requirements || []).length;
+        const boqCount = (ex.lineItems || []).length;
+        const missCount = ex.missingInfoCount ?? (ex.missingInfoQuestions || []).length;
+        const conf = Number.isFinite(c.confidence)
+          ? Math.round(c.confidence * 100) + "%"
+          : "—";
+        const when = c.ingestedAt ? new Date(c.ingestedAt).toLocaleString() : "";
+        const mode = ex.extractionMode === "llm" ? "LLM" : "Rules";
+        const dlBtn = (!IS_STATIC && ex.boqExcelUrl)
+          ? `<a class="btn-secondary" download href="${escapeHtml(ex.boqExcelUrl)}" title="Download BOQ Excel" style="min-height:36px;padding:8px 12px;">⬇ Excel</a>`
+          : "";
+        return `<div class="history-row">
+          <div class="history-row-main">
+            <p class="history-row-title">${escapeHtml(c.caseId || "Case")}</p>
+            <p class="history-row-meta">${escapeHtml(c.fileName || "uploaded")} · ${escapeHtml(when)} · ${c.fileCount || 1} file(s)</p>
+            <div class="history-row-badges">
+              <span class="badge accent">${boqCount} BOQ line(s)</span>
+              <span class="badge">${reqCount} requirement(s)</span>
+              ${missCount ? `<span class="badge priority-medium">${missCount} clarification(s)</span>` : ""}
+              <span class="badge">${conf} confidence</span>
+              <span class="badge">${mode}</span>
+            </div>
+          </div>
+          <div class="history-row-actions">
+            ${dlBtn}
+            <button class="btn-primary" type="button" data-view-case="${escapeHtml(c.caseId)}" style="min-height:36px;padding:8px 14px;">View</button>
+            <button class="btn-secondary" type="button" data-delete-case="${escapeHtml(c.caseId)}" style="min-height:36px;padding:8px 12px;">Delete</button>
+          </div>
+        </div>`;
+      })
+      .join("");
+
+    container.querySelectorAll("[data-view-case]").forEach((btn) =>
+      btn.addEventListener("click", () => viewHistoricalCase(btn.dataset.viewCase))
+    );
+    container.querySelectorAll("[data-delete-case]").forEach((btn) =>
+      btn.addEventListener("click", () => deleteCase(btn.dataset.deleteCase))
+    );
+  }
+
+  function viewHistoricalCase(caseId) {
+    const record = loadHistory().find((c) => c.caseId === caseId);
+    if (!record || !record.extraction) return;
+    renderExtraction(record.extraction);
+    const badge = $("#boq-status");
+    if (badge) {
+      badge.textContent = `History · ${caseId}`;
+      badge.className = "badge accent";
+    }
+    closeHistory();
+    switchTab("boq");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openHistory() {
+    renderHistoryList();
+    $("#history-modal").classList.remove("hidden");
+  }
+
+  function closeHistory() {
+    $("#history-modal").classList.add("hidden");
+  }
+
+  $("#btn-history").addEventListener("click", openHistory);
+  $("#btn-history-close").addEventListener("click", closeHistory);
+  $("#btn-history-clear").addEventListener("click", () => {
+    if (confirm("Clear all locally stored cases? This cannot be undone.")) clearHistory();
+  });
+  $("#history-modal").addEventListener("click", (e) => {
+    if (e.target === $("#history-modal")) closeHistory(); // click backdrop to close
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#history-modal").classList.contains("hidden")) closeHistory();
+  });
+
   // ── Initial data load ──────────────────────────────────────────────────
   loadPoc1Status();
   loadSampleBoq();
   loadSyncStatus();
+  updateHistoryCount();
 })();
 
 function toggleCollapsible(bodyId, chevronId, labelId) {

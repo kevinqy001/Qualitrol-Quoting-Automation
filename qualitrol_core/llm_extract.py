@@ -353,6 +353,57 @@ _VALID_ASSET_TYPES = {
 _VALID_STATUS = {"New", "Existing", "Future", "Provision", "Unclear"}
 
 
+def extract_sld_text_vlm(
+    client,
+    image_b64: str,
+    drawing_id: str,
+) -> Optional[str]:
+    """Read the printed text/labels off a drawing image (VLM OCR).
+
+    Used when a project supplies SLD/BLD drawings but little or no prose
+    specification (the drawing's text layer is sparse). The returned text —
+    panel titles, device/function labels, legends, scope notes — is injected
+    back into the document so the normal text-driven scenario detection can
+    match scenario keywords (e.g. "DFR", "PMU", "PQM", "FMS", "Fault Recorder",
+    "Power Quality"). Returns ``None`` on any failure (fails safe).
+    """
+    if not client.available:
+        return None
+
+    system = (
+        "You are reading a power-grid Single Line Diagram / Block Diagram for a "
+        "Qualitrol monitoring quotation. Extract ONLY the text relevant to MONITORING "
+        "SCOPE so a quoting engine can detect application scenarios. Include: "
+        "monitoring/panel/function labels (DFR, DDR, PMU, PQM, FMS, WAMS, Fault "
+        "Recorder, Fault Locator, Power Quality, Disturbance Recorder, SCADA, IEC 61850), "
+        "asset types being monitored (transformer, GIS, circuit breaker, busbar, feeder, "
+        "reactor), voltage levels, feeder/bay names, and scope notes (FUTURE / PROVISION "
+        "/ EXISTING). IGNORE cable sizes, ratings, title-block / client / consultant / "
+        "drawing-number text. Do NOT invent text. Respond with STRICT JSON only."
+    )
+    user = (
+        "List the monitoring-relevant labels you can read (max ~40 short items) plus a "
+        "one-sentence summary of the monitoring functions shown. "
+        'Return JSON: {"labels": ["...", "..."], "notes": "..."}'
+    )
+    try:
+        # Generous token budget: a truncated response yields invalid JSON -> None.
+        data = client.complete_json_with_image(system, user, image_b64, max_tokens=4000)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
+    labels = data.get("labels") or []
+    notes = str(data.get("notes", "")).strip()
+    parts: list[str] = []
+    if isinstance(labels, list):
+        parts.extend(str(x).strip() for x in labels if str(x).strip())
+    if notes:
+        parts.append(notes)
+    text = "\n".join(parts).strip()
+    return text or None
+
+
 def extract_sld_assets_vlm(
     client,
     image_b64: str,

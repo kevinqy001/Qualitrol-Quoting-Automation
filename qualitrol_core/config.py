@@ -19,6 +19,35 @@ DATA_PACKAGE_PATH: Path = REPO_ROOT / "Qualitrol_BOQ_Matching_Data_Package.xlsx"
 STEP0_DIR: Path = REPO_ROOT / "Step 0 _ Tavily Search"
 STEP1_DIR: Path = REPO_ROOT / "Step 1 _ Extract Info"
 STEP2_DIR: Path = REPO_ROOT / "Step 2 _ Create BOQ"
+STEP4_DIR: Path = REPO_ROOT / "Step 4 _ Generate Quotation"
+
+# Standard Qualitrol quotation template (Step 4). The quotation generator clones
+# this file so every page, section, style and the legal Terms & Conditions match
+# the official layout exactly; only the dynamic regions are filled in and prices
+# (pending Step 3) are left blank. Override with QUALITROL_QUOTATION_TEMPLATE.
+#
+# This is a local, pre-built BLANK master template (project-specific content
+# neutralised) so Step 4 no longer re-extracts from the Gemba sample on each run.
+# Rebuild it with: python "Step 4 _ Generate Quotation/build_blank_template.py"
+QUOTATION_TEMPLATE_PATH: Path = STEP4_DIR / "Quotation_Template.docx"
+
+
+def quotation_template_path() -> Path:
+    """Resolve the Step 4 quotation template (env override wins)."""
+    override = os.getenv("QUALITROL_QUOTATION_TEMPLATE")
+    return Path(override) if override else QUOTATION_TEMPLATE_PATH
+
+
+# Standard BOQ Excel template (Step 2). The BOQ generator clones this blank
+# template (derived from the official sample BOQ) and fills the draft BOQ lines.
+# Rebuild it with: python "Step 2 _ Create BOQ/build_blank_boq_template.py"
+BOQ_TEMPLATE_PATH: Path = STEP2_DIR / "BOQ_Template.xlsx"
+
+
+def boq_template_path() -> Path:
+    """Resolve the Step 2 BOQ Excel template (env override wins)."""
+    override = os.getenv("QUALITROL_BOQ_TEMPLATE")
+    return Path(override) if override else BOQ_TEMPLATE_PATH
 
 SAMPLE_SUBMISSIONS_DIR: Path = (
     REPO_ROOT / "Gemba Samples" / "Sample Customer Submissions"

@@ -141,12 +141,69 @@ def _future_scope_questions(
 # Quantity calculation (Quantity Rules + Drawing Asset List)
 # --------------------------------------------------------------------------- #
 def _calc_quantity(rule, asset_counts: dict[str, float]):
-    """Return (quantity, unit, basis, assumption, derivable)."""
+    """Return (quantity, unit, basis, assumption, derivable).
+
+    Sizing strategy (P1-B):
+      1. System-level items (software / gateway / server / licences) are quoted
+         once per substation/system — fixed quantity 1.
+      2. Recorder/DAU families (channel_count / feeder_count) are sized from the
+         feeder count via the IDM+ channel budget (≈``FEEDERS_PER_DAU`` feeders
+         per DAU); falls back to a bus/measurement-point estimate (flagged for
+         confirmation) when feeders weren't extracted.
+      3. Everything else counts the mapped drawing asset type directly.
+    """
+    import math
+
     if rule is None:
         return 1.0, "set", "Default 1 per scope", "No quantity rule found.", False
 
-    count_field = rule.count_field
-    asset_types = constants.COUNT_FIELD_TO_ASSET_TYPE.get(count_field, [])
+    count_field = (rule.count_field or "").lower()
+
+    # (1) System-level fixed-quantity items (1 per substation/system).
+    if any(h in count_field for h in constants.FIXED_ONE_COUNT_FIELD_HINTS):
+        return (
+            1.0,
+            "set",
+            f"{rule.quantity_basis} (1 per substation/system)",
+            (rule.assumption or "Quoted once per system; confirm licence/user tier "
+             "and redundancy."),
+            True,
+        )
+
+    # (2) Recorder / DAU families sized from feeders (IDM+ channel budget).
+    if count_field in constants.DAU_SIZED_COUNT_FIELDS:
+        feeders = asset_counts.get("Feeder", 0)
+        if feeders:
+            dau = max(1, math.ceil(feeders / constants.FEEDERS_PER_DAU))
+            return (
+                float(dau),
+                "set",
+                f"Recorder/DAU count = ceil({int(feeders)} feeders / "
+                f"{constants.FEEDERS_PER_DAU} per DAU)",
+                (f"Sized at ~{constants.CHANNELS_PER_FEEDER} analogue channels/feeder, "
+                 f"{constants.CHANNELS_PER_DAU} per DAU; confirm channel list."),
+                True,
+            )
+        # Fallback: estimate from buses / measurement points (needs confirmation).
+        for atype in ("Bus", "Measurement Point", "PCC"):
+            if atype in asset_counts:
+                est = max(1, int(asset_counts[atype]))
+                return (
+                    float(est),
+                    "set",
+                    f"Estimated recorder count from {atype}={est} (feeder list "
+                    "unavailable)",
+                    (f"{count_field} not provided; estimated from {atype}. "
+                     "Confirm feeder/channel list to finalise DAU count."),
+                    False,
+                )
+        return (
+            0.0, "set", rule.quantity_basis,
+            f"{count_field} not available; {rule.assumption}", False,
+        )
+
+    # (3) Default: count the mapped drawing asset type directly.
+    asset_types = constants.COUNT_FIELD_TO_ASSET_TYPE.get(rule.count_field, [])
     for atype in asset_types:
         if atype in asset_counts:
             qty = asset_counts[atype]
@@ -161,7 +218,7 @@ def _calc_quantity(rule, asset_counts: dict[str, float]):
         0.0,
         "set",
         rule.quantity_basis,
-        f"{count_field} not available; {rule.assumption}",
+        f"{rule.count_field} not available; {rule.assumption}",
         False,
     )
 
@@ -666,4 +723,16 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
 
     out_path = io_utils.write_json(Path(output_dir) / "step2_create_boq.json", result)
     result["_output_path"] = str(out_path)
+
+    # Generate the finished BOQ Excel from the standard template (best-effort).
+    try:
+        from qualitrol_core import boq_excel
+
+        boq_path = boq_excel.generate_boq_excel(
+            result, Path(output_dir) / f"BOQ-{project_id}.xlsx"
+        )
+        result["_boq_excel_path"] = str(boq_path)
+    except Exception as exc:  # noqa: BLE001 - never fail the pipeline over the report
+        result["_boq_excel_error"] = str(exc)
+
     return result
