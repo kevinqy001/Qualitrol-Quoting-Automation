@@ -359,8 +359,9 @@
 
   function renderExtraction(boq) {
     $("#boq-ref").textContent = boq.boqId || boq.caseReference || "BOQ";
-    $("#extraction-summary").textContent =
-      boq.extractionSummary || "No extraction summary returned.";
+    $("#extraction-summary").innerHTML = escapeHtml(
+      boq.extractionSummary || "No extraction summary returned."
+    ).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     renderFeatures(boq.features || {});
     renderMissingInfoQuestions(boq.missingInfoQuestions || []);
     renderRequirements(boq.requirements || []);
@@ -619,16 +620,6 @@
     }
   }
 
-  function triggerDownload(url, filename) {
-    if (!url) return;
-    const a = document.createElement("a");
-    a.href = url;
-    if (filename) a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }
-
   async function regenerateAndDownloadBoq(items) {
     const caseId = currentExtraction && currentExtraction.caseReference;
     if (IS_STATIC || !caseId) return;
@@ -658,8 +649,6 @@
         dlBtn.classList.remove("hidden");
       }
       persistCurrentCaseEdits();
-      // Auto-download the freshly regenerated, edited BOQ Excel.
-      triggerDownload(data.boqExcelUrl, data.fileName);
     } catch (err) {
       alert("Edits saved, but BOQ Excel regeneration failed: " + err.message);
     } finally {
@@ -690,7 +679,7 @@
     const saveBtn = $("#btn-edit-save");
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
     closeEditBoq();              // exit back to the Step 2 page
-    // Regenerate the BOQ Excel from the edits and download it.
+    // Regenerate the edited BOQ Excel and refresh the download button (no auto-download).
     await regenerateAndDownloadBoq(items);
   }
 

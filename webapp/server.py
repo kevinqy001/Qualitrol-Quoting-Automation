@@ -168,17 +168,23 @@ def _overview_summary(step1: dict, step2: dict, preview_text: str) -> str:
         )
 
     kvs = [int(m) for m in re.findall(r"(\d{2,4})\s*kV", preview_text or "", re.I)]
-    voltage = f"{max(kvs)} kV " if kvs else ""
+    voltage = f"**{max(kvs)} kV** " if kvs else ""
 
-    apps_str = "; ".join(apps[:6]) if apps else "general substation monitoring"
-    cats_str = "; ".join(cats[:8]) if cats else "to be confirmed"
+    apps_str = (
+        "; ".join(f"**{a}**" for a in apps[:6])
+        if apps
+        else "general substation monitoring"
+    )
+    cats_str = (
+        "; ".join(f"**{c}**" for c in cats[:8]) if cats else "to be confirmed"
+    )
 
     return (
         f"This is a {voltage}power-grid substation monitoring project "
         f"(electric utility / transmission & distribution sector). "
         f"Monitoring applications identified: {apps_str}. "
         f"Qualitrol product categories involved: {cats_str} "
-        f"({len(boq)} product line(s) proposed)."
+        f"(**{len(boq)} product line(s)** proposed)."
     )
 
 
@@ -355,6 +361,11 @@ async def _run_pipelines(
 @app.get("/", include_in_schema=False)
 async def index(request: Request):
     return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(path=str(STATIC_DIR / "favicon.ico"), media_type="image/x-icon")
 
 
 @app.get("/health")
