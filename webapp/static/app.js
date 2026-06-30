@@ -1032,11 +1032,596 @@
     if (e.key === "Escape" && !$("#history-modal").classList.contains("hidden")) closeHistory();
   });
 
+  // ── Tab 3: Configure & Quote ────────────────────────────────────────────
+  // selectedDiscount: a discount % chosen by clicking a Discount Sensitivity
+  // tile. When set, the Overall Summary shows that scenario; when null, it
+  // shows the totals from the user's own per-line inputs.
+  const marginState = { id: null, lines: [], selectedDiscount: null };
+  const mNum = (v) => {
+    const x = parseFloat(v);
+    return Number.isFinite(x) ? x : 0;
+  };
+  const mPct = (v) => `${(Number(v) || 0).toFixed(1)}%`;
+
+  let marginCatalog = { families: [], byFamily: {}, familyIdByName: {} };
+  let marginCatalogLoaded = false;
+
+  function marginSetCatalogStatus(text, ok) {
+    const el = $("#margin-catalog-status");
+    if (!el) return;
+    if (!text) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    el.textContent = text;
+    el.style.background = ok ? "#dcfce7" : "#fef3c7";
+    el.style.color = ok ? "#166534" : "#92400e";
+  }
+
+  // Health colour bands by TOTAL gross margin % (after the assigned discount):
+  //   <75 red · 75-80 light red · 80-85 yellow · 85-90 light green · >90 green
+  function marginHealthStyle(gm) {
+    if (gm < 75) return { bg: "#b42318", fg: "#ffffff" };  // red — danger
+    if (gm < 80) return { bg: "#f97066", fg: "#3a0a06" };  // light red
+    if (gm < 85) return { bg: "#eab308", fg: "#3a2e05" };  // yellow
+    if (gm < 90) return { bg: "#86efac", fg: "#0b3d22" };  // light green
+    return { bg: "#067647", fg: "#ffffff" };               // green — healthy
+  }
+
+  function marginHealthLabel(gm) {
+    if (gm < 75) return "Critical";
+    if (gm < 80) return "Poor";
+    if (gm < 85) return "OK";
+    if (gm < 90) return "Good";
+    return "Excellent";
+  }
+
+  async function marginLoadCatalog() {
+    if (IS_STATIC) {
+      marginSetCatalogStatus("Catalog unavailable in demo mode — type values manually", false);
+      return;
+    }
+    marginSetCatalogStatus("Loading product catalog…", false);
+    try {
+      const data = await apiGet("/margin/catalog");
+      const byFamily = {};
+      const familyIdByName = {};
+      let dlHtml = "";
+      let total = 0;
+      (data.families || []).forEach((f) => {
+        byFamily[f.id] = { name: f.name, models: {} };
+        familyIdByName[(f.name || "").trim().toLowerCase()] = f.id;
+        const opts = [];
+        (f.models || []).forEach((m) => {
+          let value = m.partNo ? `${m.model} · ${m.partNo}` : m.model;
+          let uniq = value;
+          let n = 2;
+          while (byFamily[f.id].models[uniq]) uniq = `${value} (${n++})`;
+          byFamily[f.id].models[uniq] = m;
+          opts.push(`<option value="${escapeHtml(uniq)}">${escapeHtml(m.section || "")}</option>`);
+          total++;
+        });
+        dlHtml += `<datalist id="mdl-${escapeHtml(f.id)}">${opts.join("")}</datalist>`;
+      });
+      // Families datalist for the (manually-typeable) family combobox.
+      dlHtml +=
+        `<datalist id="margin-families">` +
+        (data.families || [])
+          .map((f) => `<option value="${escapeHtml(f.name)}"></option>`)
+          .join("") +
+        `</datalist>`;
+      $("#margin-datalists").innerHTML = dlHtml;
+      marginCatalog = {
+        families: (data.families || []).map((f) => ({ id: f.id, name: f.name })),
+        byFamily,
+        familyIdByName,
+      };
+      marginCatalogLoaded = true;
+      marginSetCatalogStatus(`Catalog ready · ${total} models`, true);
+      setTimeout(() => marginSetCatalogStatus("", true), 4000);
+      renderMarginTable();
+    } catch (_) {
+      marginSetCatalogStatus("Catalog failed to load — you can still type values manually", false);
+    }
+  }
+
+  // Resolve a typed/selected family name to its catalog id ("" when custom).
+  function marginFamilyIdFromName(name) {
+    return marginCatalog.familyIdByName[(name || "").trim().toLowerCase()] || "";
+  }
+
+  function marginApplyCatalogModel(idx, rec) {
+    const cur = $("#margin-currency").value;
+    const line = marginState.lines[idx];
+    const lp = rec.listPrice || {};
+    const cc = rec.cost || {};
+    line.description = rec.model;
+    line.productCode = rec.partNo || "";
+    line.catalogRef = { familyId: line.familyId, model: rec.model };
+    line.unitListPrice = lp[cur] != null ? lp[cur] : lp.USD != null ? lp.USD : "";
+    line.unitCost = cc[cur] != null ? cc[cur] : cc.USD != null ? cc.USD : "";
+  }
+
+  function marginReprice() {
+    const cur = $("#margin-currency").value;
+    let any = false;
+    marginState.lines.forEach((line) => {
+      const ref = line.catalogRef;
+      const fam = ref && marginCatalog.byFamily[ref.familyId];
+      if (!fam) return;
+      const rec = Object.values(fam.models).find((m) => m.model === ref.model);
+      if (!rec) return;
+      const lp = rec.listPrice || {};
+      const cc = rec.cost || {};
+      line.unitListPrice = lp[cur] != null ? lp[cur] : lp.USD != null ? lp.USD : "";
+      line.unitCost = cc[cur] != null ? cc[cur] : cc.USD != null ? cc.USD : "";
+      any = true;
+    });
+    if (any) renderMarginTable();
+    else recomputeMargin();
+  }
+
+  function renderSensitivity(totals) {
+    const el = $("#margin-sensitivity");
+    if (!totals || totals.totalList <= 0) {
+      el.innerHTML =
+        `<p class="section-copy" style="grid-column:1/-1;">Configure lines above to see the discount sensitivity.</p>`;
+      return;
+    }
+    const currency = $("#margin-currency").value;
+    const steps = [0, 5, 10, 15, 20];
+    el.innerHTML = steps
+      .map((d) => {
+        const quoted = totals.totalList * (1 - d / 100);
+        // Colour reflects total-margin health behind the scenes; only the
+        // total quoted price is shown (no cost/margin numbers exposed).
+        const gm = quoted > 0 ? (1 - totals.cogs / quoted) * 100 : 0;
+        const st = marginHealthStyle(gm);
+        const selected = marginState.selectedDiscount === d;
+        const ring = selected
+          ? "outline:3px solid #1f3a5f; outline-offset:2px; box-shadow:0 2px 8px rgba(0,0,0,0.18);"
+          : "";
+        return `<div data-d="${d}" title="Click to apply this discount to the Overall Summary" style="cursor:pointer; border-radius:10px; padding:14px 8px; text-align:center; background:${st.bg}; color:${st.fg}; ${ring}">
+          <div style="font-size:12px; font-weight:600; opacity:.92;">${d}% discount${selected ? " ✓" : ""}</div>
+          <div style="font-size:18px; font-weight:800; margin-top:5px; white-space:nowrap;">${fmtMoney(quoted, currency)}</div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  function marginReadGlobals() {
+    // These cost/discount fields were removed from the UI; read safely so the
+    // calculation logic still works (defaults to 0 when a field is absent).
+    const val = (id) => {
+      const el = $("#" + id);
+      return el ? el.value : 0;
+    };
+    return {
+      discountPct: val("margin-discount"),
+      freight: val("margin-freight"),
+      labour: val("margin-labour"),
+      overheads: val("margin-overheads"),
+      fieldService: val("margin-fieldservice"),
+    };
+  }
+
+  function computeMarginsClient() {
+    const g = marginReadGlobals();
+    const dd = mNum(g.discountPct);
+    const lines = marginState.lines.map((ln) => {
+      const qty = mNum(ln.qty);
+      const ul = mNum(ln.unitListPrice);
+      const uc = mNum(ln.unitCost);
+      const hasLineDisc = ln.discountPct !== "" && ln.discountPct != null;
+      const disc = hasLineDisc ? mNum(ln.discountPct) : dd;
+      const extList = qty * ul;
+      const netUnit = ul * (1 - disc / 100);
+      const extNet = qty * netUnit;
+      const extCost = qty * uc;
+      const margin = extNet > 0 ? (1 - extCost / extNet) * 100 : 0;
+      return { extList, netUnit, extNet, extCost, margin, family: ln.family || "Unassigned" };
+    });
+    const totalList = lines.reduce((s, l) => s + l.extList, 0);
+    const totalNet = lines.reduce((s, l) => s + l.extNet, 0);
+    const totalMat = lines.reduce((s, l) => s + l.extCost, 0);
+    const cogs =
+      totalMat + mNum(g.freight) + mNum(g.labour) + mNum(g.overheads) + mNum(g.fieldService);
+    const fams = {};
+    const order = [];
+    lines.forEach((l) => {
+      if (!fams[l.family]) {
+        fams[l.family] = { family: l.family, lines: 0, extList: 0, extNet: 0, extCost: 0 };
+        order.push(l.family);
+      }
+      const f = fams[l.family];
+      f.lines += 1;
+      f.extList += l.extList;
+      f.extNet += l.extNet;
+      f.extCost += l.extCost;
+    });
+    const families = order.map((k) => {
+      const f = fams[k];
+      return {
+        ...f,
+        margin: f.extNet > 0 ? (1 - f.extCost / f.extNet) * 100 : 0,
+      };
+    });
+    return {
+      lines,
+      families,
+      totals: {
+        totalList,
+        totalNet,
+        cogs,
+        overallDiscount: totalList > 0 ? ((totalList - totalNet) / totalList) * 100 : 0,
+        listGM: totalList > 0 ? (1 - cogs / totalList) * 100 : 0,
+        quotedGM: totalNet > 0 ? (1 - cogs / totalNet) * 100 : 0,
+      },
+    };
+  }
+
+  function recomputeMargin() {
+    const currency = $("#margin-currency").value;
+    const r = computeMarginsClient();
+    const tbody = $("#margin-table-body");
+    r.lines.forEach((l, i) => {
+      const tr = tbody.querySelector(`tr[data-row="${i}"]`);
+      if (!tr) return;
+      tr.querySelector('[data-c="extList"]').textContent = fmtMoney(l.extList, currency);
+      tr.querySelector('[data-c="net"]').textContent = fmtMoney(l.extNet, currency);
+    });
+    const t = r.totals;
+    $("#sum-list").textContent = fmtMoney(t.totalList, currency);
+
+    const sel = marginState.selectedDiscount;
+    const note = $("#margin-scenario-note");
+    let dispQuoted, dispDisc;
+    if (sel != null) {
+      dispQuoted = t.totalList * (1 - sel / 100);
+      dispDisc = sel;
+      if (note) {
+        note.textContent = `Showing the ${sel}% discount scenario from Discount Sensitivity. Click the highlighted tile again (or edit a line) to use your own line discounts.`;
+      }
+    } else {
+      dispQuoted = t.totalNet;
+      dispDisc = t.overallDiscount;
+      if (note) note.textContent = "";
+    }
+    $("#sum-quoted").textContent = fmtMoney(dispQuoted, currency);
+    $("#sum-discount").textContent = mPct(dispDisc);
+
+    // Colour band for the CURRENT result's margin health — works at any
+    // discount, including beyond the 0-20% sensitivity tiles.
+    const band = $("#margin-health-band");
+    if (band) {
+      if (t.totalList > 0) {
+        const gm = dispQuoted > 0 ? (1 - t.cogs / dispQuoted) * 100 : 0;
+        const st = marginHealthStyle(gm);
+        band.style.display = "";
+        band.style.background = st.bg;
+        band.style.color = st.fg;
+        band.textContent = `At ${mPct(dispDisc)} discount: ${marginHealthLabel(gm)}`;
+      } else {
+        band.style.display = "none";
+      }
+    }
+    renderSensitivity(t);
+
+    // The per-family breakdown table was removed from the UI; compute still
+    // runs (families are available for export) but there is nothing to render.
+    const fb = $("#margin-family-body");
+    if (fb) {
+      fb.innerHTML = r.families
+        .map(
+          (f) => `<tr>
+            <td>${escapeHtml(f.family)}</td>
+            <td class="text-right">${f.lines}</td>
+            <td class="text-right">${fmtMoney(f.extList, currency)}</td>
+            <td class="text-right">${fmtMoney(f.extNet, currency)}</td>
+          </tr>`
+        )
+        .join("");
+    }
+  }
+
+  function renderMarginTable() {
+    const tbody = $("#margin-table-body");
+    if (!marginState.lines.length) {
+      tbody.innerHTML =
+        `<tr><td colspan="8" style="text-align:center; color: var(--muted); padding: 28px;">No lines yet — auto-fill from the BOQ, add a line, or load a record.</td></tr>`;
+      recomputeMargin();
+      return;
+    }
+    tbody.innerHTML = marginState.lines
+      .map((ln, i) => {
+        const numInp = (field, val, ph = "", w = 70) =>
+          `<input type="number" step="any" class="field-input text-right" style="width:${w}px; min-width:${w}px; padding:6px 8px;" data-i="${i}" data-f="${field}" value="${val == null || val === "" ? "" : val}" placeholder="${ph}" />`;
+        const famVal =
+          ln.family ||
+          (ln.familyId && marginCatalog.byFamily[ln.familyId]
+            ? marginCatalog.byFamily[ln.familyId].name
+            : "");
+        const famInput =
+          `<input class="field-input" style="width:100%; min-width:210px; padding:6px 8px;" data-i="${i}" data-f="familyName" list="margin-families" value="${escapeHtml(famVal)}" placeholder="select or type a family" />`;
+        const listAttr = ln.familyId ? ` list="mdl-${escapeHtml(ln.familyId)}"` : "";
+        const modelInp =
+          `<input class="field-input" style="width:100%; min-width:330px; padding:6px 8px;" data-i="${i}" data-f="model"${listAttr} value="${escapeHtml(ln.description == null ? "" : ln.description)}" placeholder="${ln.familyId ? "type to search a model…" : "type a model or description"}" />` +
+          (ln.productCode ? `<div style="font-size:11px; color:var(--muted); margin-top:3px;">${escapeHtml(ln.productCode)}</div>` : "");
+        return `<tr data-row="${i}">
+          <td style="min-width:220px;">${famInput}</td>
+          <td style="min-width:340px;">${modelInp}</td>
+          <td class="text-right">${numInp("qty", ln.qty, "", 56)}</td>
+          <td class="text-right">${numInp("unitListPrice", ln.unitListPrice)}</td>
+          <td class="text-right">${numInp("discountPct", ln.discountPct, "0")}</td>
+          <td class="text-right" data-c="extList">-</td>
+          <td class="text-right" data-c="net">-</td>
+          <td class="text-right"><button class="btn-secondary" style="padding:4px 10px;" data-remove="${i}" type="button">×</button></td>
+        </tr>`;
+      })
+      .join("");
+    recomputeMargin();
+  }
+
+  // Delegated edits on the line table. Numeric/text fields recompute live
+  // (keeping input focus); family/model selection is committed on `change`.
+  $("#margin-table-body").addEventListener("input", (e) => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.i == null || !el.dataset.f) return;
+    const idx = Number(el.dataset.i);
+    const line = marginState.lines[idx];
+    if (!line) return;
+    const f = el.dataset.f;
+    if (f === "familyName") {
+      line.family = el.value; // free text; id resolved on change
+      return;
+    }
+    if (f === "model") {
+      line.description = el.value; // live text; catalog match resolved on change
+      return;
+    }
+    line[f] = el.value;
+    marginState.selectedDiscount = null; // own input takes over the summary
+    recomputeMargin();
+  });
+  $("#margin-table-body").addEventListener("change", (e) => {
+    const el = e.target;
+    if (!el.dataset || el.dataset.i == null || !el.dataset.f) return;
+    const idx = Number(el.dataset.i);
+    const line = marginState.lines[idx];
+    if (!line) return;
+    const f = el.dataset.f;
+    marginState.selectedDiscount = null; // configuring a line uses own inputs
+    if (f === "familyName") {
+      line.family = el.value;
+      line.familyId = marginFamilyIdFromName(el.value); // "" when custom
+      line.catalogRef = null;
+      renderMarginTable();
+      return;
+    }
+    if (f === "model") {
+      const fam = line.familyId;
+      const rec =
+        fam && marginCatalog.byFamily[fam]
+          ? marginCatalog.byFamily[fam].models[el.value]
+          : null;
+      if (rec) marginApplyCatalogModel(idx, rec);
+      else {
+        line.description = el.value;
+        line.catalogRef = null;
+      }
+      renderMarginTable();
+    }
+  });
+  $("#margin-table-body").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-remove]");
+    if (!btn) return;
+    marginState.lines.splice(Number(btn.dataset.remove), 1);
+    marginState.selectedDiscount = null;
+    renderMarginTable();
+  });
+
+  // Currency change re-prices catalog-linked lines (other global cost inputs
+  // were removed from the UI).
+  $("#margin-currency").addEventListener("change", marginReprice);
+
+  // Clicking a Discount Sensitivity tile applies that discount to the Overall
+  // Summary; clicking the active tile again clears it (back to own inputs).
+  $("#margin-sensitivity").addEventListener("click", (e) => {
+    const cell = e.target.closest("[data-d]");
+    if (!cell) return;
+    const d = Number(cell.dataset.d);
+    marginState.selectedDiscount = marginState.selectedDiscount === d ? null : d;
+    recomputeMargin();
+  });
+
+  function marginScenarioName(boq, sid) {
+    const det = (boq.detectedScenarios || []).find((d) => d.scenario_id === sid);
+    return det ? det.scenario : sid || "";
+  }
+
+  function marginAutofillFromBoq(boq) {
+    boq = boq || currentExtraction;
+    if (!boq || !(boq.lineItems || []).length) return false;
+    $("#margin-project").value = boq.caseReference || boq.boqId || "";
+    marginState.id = null;
+    marginState.selectedDiscount = null;
+    marginState.lines = boq.lineItems.map((item) => {
+      const sid = item.technicalParams && item.technicalParams.scenario;
+      return {
+        description: item.description || item.productCode || "",
+        family: sid ? marginScenarioName(boq, sid) : "",
+        productCode: item.productCode || item.product_model || "",
+        qty: item.quantity || 0,
+        unitListPrice: "",
+        unitCost: "",
+        discountPct: "",
+      };
+    });
+    $("#margin-source").textContent = `From BOQ ${boq.caseReference || boq.boqId || ""}`;
+    renderMarginTable();
+    return true;
+  }
+
+  function marginPayload() {
+    return {
+      id: marginState.id || undefined,
+      name: $("#margin-project").value || "Margin",
+      caseReference: $("#margin-project").value || "",
+      currency: $("#margin-currency").value,
+      globals: marginReadGlobals(),
+      lines: marginState.lines.map((l) => ({
+        description: l.description || "",
+        family: l.family || "",
+        familyId: l.familyId || "",
+        catalogRef: l.catalogRef || null,
+        productCode: l.productCode || "",
+        qty: l.qty,
+        unitListPrice: l.unitListPrice,
+        unitCost: l.unitCost,
+        discountPct: l.discountPct,
+      })),
+    };
+  }
+
+  $("#btn-margin-autofill").addEventListener("click", () => {
+    if (!marginAutofillFromBoq()) {
+      alert("No BOQ available to auto-fill. Upload documents or load the sample in Step 2 first.");
+    }
+  });
+
+  $("#btn-margin-addline").addEventListener("click", () => {
+    marginState.lines.push({
+      description: "", family: "", productCode: "", qty: 1,
+      unitListPrice: "", unitCost: "", discountPct: "",
+    });
+    marginState.selectedDiscount = null;
+    renderMarginTable();
+  });
+
+  async function marginRefreshRecords() {
+    if (IS_STATIC) return;
+    try {
+      const data = await apiGet("/margin/records");
+      const sel = $("#margin-load");
+      const opts = ['<option value="">— previous records —</option>'];
+      (data.records || []).forEach((r) => {
+        const gm = r.summary && r.summary.quotedMarginPct != null ? ` · GM ${r.summary.quotedMarginPct}%` : "";
+        opts.push(`<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)} (${escapeHtml(r.savedAt || "")})${gm}</option>`);
+      });
+      sel.innerHTML = opts.join("");
+    } catch (_) {}
+  }
+
+  $("#margin-load").addEventListener("change", async (e) => {
+    const id = e.target.value;
+    if (!id) return;
+    try {
+      const rec = await apiGet(`/margin/records/${id}`);
+      marginState.id = rec.id || id;
+      marginState.selectedDiscount = null;
+      $("#margin-project").value = rec.caseReference || rec.name || "";
+      $("#margin-currency").value = rec.currency || "USD";
+      const g = rec.globals || {};
+      const setVal = (idAttr, v) => {
+        const el = $("#" + idAttr);
+        if (el) el.value = v;
+      };
+      setVal("margin-discount", g.discountPct != null ? g.discountPct : 0);
+      setVal("margin-freight", g.freight != null ? g.freight : 0);
+      setVal("margin-labour", g.labour != null ? g.labour : 0);
+      setVal("margin-overheads", g.overheads != null ? g.overheads : 0);
+      setVal("margin-fieldservice", g.fieldService != null ? g.fieldService : 0);
+      marginState.lines = (rec.lines || []).map((l) => ({
+        description: l.description || "", family: l.family || "",
+        familyId: l.familyId || "", catalogRef: l.catalogRef || null,
+        productCode: l.productCode || "", qty: l.qty,
+        unitListPrice: l.unitListPrice, unitCost: l.unitCost, discountPct: l.discountPct,
+      }));
+      $("#margin-source").textContent = `Loaded record ${rec.id || id}`;
+      renderMarginTable();
+    } catch (err) {
+      alert("Failed to load record: " + err.message);
+    }
+  });
+
+  $("#btn-margin-save").addEventListener("click", async () => {
+    if (IS_STATIC) {
+      alert("Saving is only available when running the local backend (python app.py).");
+      return;
+    }
+    if (!marginState.lines.length) {
+      alert("Nothing to save — add at least one line.");
+      return;
+    }
+    const status = $("#margin-status");
+    try {
+      const res = await fetch(`${API}/margin/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(marginPayload()),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      marginState.id = data.id;
+      status.textContent = `Saved as ${data.id} at ${new Date(data.savedAt).toLocaleTimeString()}.`;
+      await marginRefreshRecords();
+    } catch (err) {
+      status.textContent = "Save failed: " + err.message;
+    }
+  });
+
+  $("#btn-margin-export").addEventListener("click", async () => {
+    if (IS_STATIC) {
+      alert("Excel export is only available when running the local backend (python app.py).");
+      return;
+    }
+    if (!marginState.lines.length) {
+      alert("Nothing to export — add at least one line.");
+      return;
+    }
+    const btn = $("#btn-margin-export");
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Exporting…";
+    try {
+      const res = await fetch(`${API}/margin/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(marginPayload()),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const ref = ($("#margin-project").value || "DRAFT").replace(/[^A-Za-z0-9_-]/g, "");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Qualitrol_Quote_${ref}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Export failed: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+  // Opening the Configure & Quote tab carries over the reviewed BOQ when the
+  // calculator is still empty (master's nav has no explicit hand-off button).
+  document.querySelector('.tab-btn[data-tab="margin"]')?.addEventListener("click", () => {
+    if (!marginState.lines.length) marginAutofillFromBoq();
+  });
+
   // ── Initial data load ──────────────────────────────────────────────────
   loadPoc1Status();
   loadSampleBoq();
   loadSyncStatus();
   updateHistoryCount();
+  marginLoadCatalog();
+  marginRefreshRecords();
 })();
 
 function toggleCollapsible(bodyId, chevronId, labelId) {

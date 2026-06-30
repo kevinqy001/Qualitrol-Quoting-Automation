@@ -48,6 +48,21 @@ from qualitrol_core import config, io_utils  # noqa: E402
 from qualitrol_core.document_parser import parse_project_folder  # noqa: E402
 from webapp.docgen import generate_quotation_docx  # noqa: E402
 
+# Step 3 (Configure & Quote / Margin Calculator) lives in its own root folder;
+# load its modules by adding that directory to sys.path (the name has spaces).
+if str(config.STEP3_DIR) not in sys.path:
+    sys.path.insert(0, str(config.STEP3_DIR))
+import catalog as margin_catalog  # noqa: E402  (Step 3 _ Configure & Quote/catalog.py)
+from margin_calc import compute_margins  # noqa: E402
+from margin_excel import generate_margin_xlsx  # noqa: E402
+
+# Warm the product-catalog cache at import so the first /margin/catalog request
+# returns immediately instead of parsing the JSON on the request path.
+try:
+    margin_catalog.load_catalog()
+except Exception:  # pragma: no cover - defensive; endpoint will retry lazily
+    pass
+
 TEMPLATES_DIR = WEBAPP_DIR / "templates"
 STATIC_DIR = WEBAPP_DIR / "static"
 
@@ -552,6 +567,111 @@ async def get_sample_spec():
         else "sample_submission"
     )
     return {"fileName": file_name, "content": preview or "No sample source available."}
+
+
+# --------------------------------------------------------------------------- #
+# Step 3 - Configure & Quote: margin calculator (compute / persist / export)
+# --------------------------------------------------------------------------- #
+MARGIN_DIR = config.OUTPUT_DIR / "_margin"
+
+
+@app.get("/api/v1/margin/catalog")
+async def margin_catalog_endpoint():
+    """Product catalog (families -> models -> price/cost) for the calculator.
+
+    Feeds the cascading family -> model pickers in Step 3 so selecting a model
+    auto-fills its list price and material cost from the price list.
+    """
+    return margin_catalog.load_catalog()
+
+
+@app.post("/api/v1/margin/calculate")
+async def margin_calculate(request: Request):
+    """Compute per-line, per-family and overall margins from calculator inputs."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be a calculator payload.")
+    return compute_margins(payload)
+
+
+@app.post("/api/v1/margin/save")
+async def margin_save(request: Request):
+    """Persist a calculator record so it can be reloaded later."""
+    try:
+        record = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(record, dict):
+        raise HTTPException(400, "Request body must be a calculator record.")
+
+    record_id = str(record.get("id") or f"MGN-{uuid.uuid4().hex[:8].upper()}")
+    record["id"] = record_id
+    record["savedAt"] = _now()
+    record["summary"] = compute_margins(record).get("summary", {})
+
+    MARGIN_DIR.mkdir(parents=True, exist_ok=True)
+    io_utils.write_json(MARGIN_DIR / f"{record_id}.json", record)
+    return {"id": record_id, "savedAt": record["savedAt"], "summary": record["summary"]}
+
+
+@app.get("/api/v1/margin/records")
+async def margin_records():
+    """List saved margin records (most recent first)."""
+    if not MARGIN_DIR.exists():
+        return {"records": []}
+    out = []
+    for path in MARGIN_DIR.glob("*.json"):
+        try:
+            rec = io_utils.read_json(path)
+        except Exception:
+            continue
+        out.append({
+            "id": rec.get("id", path.stem),
+            "name": rec.get("name") or rec.get("caseReference") or path.stem,
+            "caseReference": rec.get("caseReference", ""),
+            "savedAt": rec.get("savedAt", ""),
+            "summary": rec.get("summary", {}),
+        })
+    out.sort(key=lambda r: r.get("savedAt", ""), reverse=True)
+    return {"records": out}
+
+
+@app.get("/api/v1/margin/records/{record_id}")
+async def margin_record(record_id: str):
+    """Return a full saved margin record."""
+    safe = "".join(c for c in record_id if c.isalnum() or c in ("-", "_"))
+    path = MARGIN_DIR / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(404, f"Margin record '{record_id}' not found.")
+    return io_utils.read_json(path)
+
+
+@app.post("/api/v1/margin/export")
+async def margin_export(request: Request):
+    """Generate an .xlsx margin sheet (price-list layout) and return it."""
+    try:
+        record = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(record, dict):
+        raise HTTPException(400, "Request body must be a calculator record.")
+
+    ref = str(record.get("caseReference") or record.get("name") or record.get("id") or "DRAFT")
+    safe_ref = "".join(c for c in ref if c.isalnum() or c in ("-", "_")) or "DRAFT"
+    out_path = MARGIN_DIR / f"Qualitrol_Quote_{safe_ref}.xlsx"
+    try:
+        generated = await asyncio.to_thread(generate_margin_xlsx, record, out_path)
+    except Exception as exc:
+        logging.error("Margin export failed:\n%s", traceback.format_exc())
+        raise HTTPException(500, f"Margin export failed: {exc}") from exc
+    return FileResponse(
+        path=str(generated),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=generated.name,
+    )
 
 
 @app.get("/api/v1/requirements/sample")
