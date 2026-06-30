@@ -47,6 +47,18 @@ FAMILY_SHEETS = {
     "Q-PMU Price List": ("QPMU", "Q-PMU (Phasor Measurement)"),
 }
 
+# Monitoring (data-package) family id -> priced price-list family id. The price
+# lists and the data package use different naming systems, so we cross-link the
+# equivalent product lines: the calculator surfaces the priced models when a BOQ
+# line maps to one of these monitoring families. Keep this in sync with the
+# transform in the merge tooling so manual updates and rebuilds agree.
+PRICE_LIST_FOR = {
+    "PF_DFR": "IDMPLUS",          # IDM+ fault recorder == Digital Fault / Disturbance Recorder
+    "PF_TWS": "FL8",              # FL-8 fault locator  == Traveling Wave Fault Locator
+    "PF_PQ": "INFORMA_PMDA",      # INFORMA PMD-A        == Power Quality Recorder
+    "PF_PMU": "QPMU",             # Q-PMU                == Phasor Measurement Unit
+}
+
 
 def _num(value):
     if value is None or value == "" or isinstance(value, str):
@@ -164,14 +176,17 @@ def _families_from_data_package() -> list[dict]:
                 "cost": {},
                 "catalogMarginPct": None,
             })
-        families.append({
+        fam = {
             "id": fid,
             "name": f.family_name,
             "sheet": "Data Package 06/07 (monitoring scope)",
             "priced": False,
             "modelCount": len(models),
             "models": models,
-        })
+        }
+        if fid in PRICE_LIST_FOR:
+            fam["priceListFamilyId"] = PRICE_LIST_FOR[fid]
+        families.append(fam)
     return families
 
 
@@ -205,17 +220,21 @@ def build_catalog(price_list_paths: list[Path]) -> dict:
                 fam_models[fam_id].setdefault(key, m)
         wb.close()
 
+    monitoring_back = {v: k for k, v in PRICE_LIST_FOR.items()}
     families = []
     for sheet_name, (fam_id, fam_name) in FAMILY_SHEETS.items():
         models = list(fam_models[fam_id].values())
-        families.append({
+        fam = {
             "id": fam_id,
             "name": fam_name,
             "sheet": sheet_name,
             "priced": True,
             "modelCount": len(models),
             "models": models,
-        })
+        }
+        if fam_id in monitoring_back:
+            fam["monitoringFamilyId"] = monitoring_back[fam_id]
+        families.append(fam)
 
     # Append the controlled monitoring families (GIS PD, DGA, bushing, ...).
     dp_families = _families_from_data_package()

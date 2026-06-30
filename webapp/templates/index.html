@@ -544,6 +544,42 @@
       box-shadow: 0 0 0 4px rgb(237 84 29 / 0.11);
     }
 
+    /* Step 3 Configure & Quote: refined dropdowns (custom chevron + grouping). */
+    #tab-margin select.field-input {
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      cursor: pointer;
+      font-weight: 600;
+      padding-right: 40px;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%238a6f63' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 13px center;
+      background-size: 18px 18px;
+    }
+
+    #tab-margin select.field-input:hover {
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 1px 6px rgb(35 23 18 / 0.06);
+    }
+
+    #tab-margin select.field-input:focus {
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23ed541d' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    }
+
+    #tab-margin select.field-input optgroup {
+      font-weight: 800;
+      font-style: normal;
+      color: var(--muted);
+      background: #faf6f3;
+    }
+
+    #tab-margin select.field-input option {
+      font-weight: 500;
+      color: var(--ink);
+      padding: 8px 10px;
+    }
+
     .button-row {
       display: flex;
       gap: 10px;
@@ -1254,7 +1290,7 @@
               </div>
               <div>
                 <label class="field-label" for="margin-load">Load saved record</label>
-                <select id="margin-load" class="field-input"><option value="">&mdash; previous records &mdash;</option></select>
+                <select id="margin-load" class="field-input"><option value="">&mdash; load a previous case or quote &mdash;</option></select>
               </div>
             </div>
           </div>

@@ -2781,7 +2781,8 @@
           "cost": {},
           "catalogMarginPct": null
         }
-      ]
+      ],
+      "monitoringFamilyId": "PF_DFR"
     },
     {
       "id": "FL8",
@@ -5932,7 +5933,8 @@
           },
           "catalogMarginPct": 76.5
         }
-      ]
+      ],
+      "monitoringFamilyId": "PF_TWS"
     },
     {
       "id": "INFORMA_PMDA",
@@ -8411,7 +8413,8 @@
           },
           "catalogMarginPct": 76.5
         }
-      ]
+      ],
+      "monitoringFamilyId": "PF_PQ"
     },
     {
       "id": "QPMU",
@@ -10878,7 +10881,8 @@
           },
           "catalogMarginPct": 76.5
         }
-      ]
+      ],
+      "monitoringFamilyId": "PF_PMU"
     },
     {
       "id": "PF_DGA",
@@ -11230,7 +11234,7 @@
       "name": "Power Quality Recorder",
       "sheet": "Data Package 06/07 (monitoring scope)",
       "priced": false,
-      "modelCount": 5,
+      "modelCount": 6,
       "models": [
         {
           "model": "BEN 6000",
@@ -11271,23 +11275,74 @@
           "listPrice": {},
           "cost": {},
           "catalogMarginPct": null
+        },
+        {
+          "model": "INFORMA PMD-A",
+          "partNo": "PROD_PF_PQ_06",
+          "section": "PCC / bus / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
         }
-      ]
+      ],
+      "priceListFamilyId": "INFORMA_PMDA"
     },
     {
       "id": "PF_DFR",
       "name": "Digital Fault / Disturbance Recorder",
       "sheet": "Data Package 06/07 (monitoring scope)",
       "priced": false,
-      "modelCount": 0,
-      "models": []
+      "modelCount": 5,
+      "models": [
+        {
+          "model": "IDM+",
+          "partNo": "PROD_PF_DFR_01",
+          "section": "Substation / feeder / plant bus",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "iQ+",
+          "partNo": "PROD_PF_DFR_02",
+          "section": "Substation / feeder / plant bus",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "IDM+ 9",
+          "partNo": "PROD_PF_DFR_03",
+          "section": "Substation / feeder / plant bus",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "IDM+ 18",
+          "partNo": "PROD_PF_DFR_04",
+          "section": "Substation / feeder / plant bus",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "IDM+ 36",
+          "partNo": "PROD_PF_DFR_05",
+          "section": "Substation / feeder / plant bus",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        }
+      ],
+      "priceListFamilyId": "IDMPLUS"
     },
     {
       "id": "PF_PMU",
       "name": "Phasor Measurement Unit",
       "sheet": "Data Package 06/07 (monitoring scope)",
       "priced": false,
-      "modelCount": 3,
+      "modelCount": 4,
       "models": [
         {
           "model": "HATHAWAY IDM",
@@ -11312,8 +11367,17 @@
           "listPrice": {},
           "cost": {},
           "catalogMarginPct": null
+        },
+        {
+          "model": "IDM+ (PMU option)",
+          "partNo": "PROD_PF_PMU_04",
+          "section": "Grid measurement point",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
         }
-      ]
+      ],
+      "priceListFamilyId": "QPMU"
     },
     {
       "id": "PF_SOFTWARE",
@@ -11380,6 +11444,56 @@
           "catalogMarginPct": null
         }
       ]
+    },
+    {
+      "id": "PF_TWS",
+      "name": "Traveling Wave Fault Locator",
+      "sheet": "Data Package 06/07 (monitoring scope)",
+      "priced": false,
+      "modelCount": 5,
+      "models": [
+        {
+          "model": "HATHAWAY MARK VI",
+          "partNo": "PROD_PF_TWS_01",
+          "section": "Transmission line / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "HATHAWAY DSFL",
+          "partNo": "PROD_PF_TWS_02",
+          "section": "Transmission line / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "IDM+ (TWS function)",
+          "partNo": "PROD_PF_TWS_03",
+          "section": "Transmission line / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "TWS FL-8",
+          "partNo": "PROD_PF_TWS_04",
+          "section": "Transmission line / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        },
+        {
+          "model": "TWS FL-1",
+          "partNo": "PROD_PF_TWS_05",
+          "section": "Transmission line / feeder",
+          "listPrice": {},
+          "cost": {},
+          "catalogMarginPct": null
+        }
+      ],
+      "priceListFamilyId": "FL8"
     }
   ]
 }

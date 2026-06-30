@@ -1085,11 +1085,28 @@
     marginSetCatalogStatus("Loading product catalog…", false);
     try {
       const data = await apiGet("/margin/catalog");
+      const rawFamilies = data.families || [];
+
+      // The price lists and the data package use different naming systems. Each
+      // monitoring family carries a `priceListFamilyId` cross-link; fold that
+      // priced family's models into the monitoring family so picking a model
+      // also pulls its price, and hide the standalone priced family so the
+      // dropdown shows one consistent (knowledge-base) family per product line.
+      const pricedById = {};
+      rawFamilies.forEach((f) => { if (f.priced) pricedById[f.id] = f; });
+      const absorbed = new Set();
+      const families = rawFamilies.map((f) => {
+        const link = f.priceListFamilyId && pricedById[f.priceListFamilyId];
+        if (!link) return f;
+        absorbed.add(f.priceListFamilyId);
+        return { ...f, models: (f.models || []).concat(link.models || []) };
+      });
+
       const byFamily = {};
       const familyIdByName = {};
       let dlHtml = "";
       let total = 0;
-      (data.families || []).forEach((f) => {
+      families.forEach((f) => {
         byFamily[f.id] = { name: f.name, models: {} };
         familyIdByName[(f.name || "").trim().toLowerCase()] = f.id;
         const opts = [];
@@ -1104,16 +1121,18 @@
         });
         dlHtml += `<datalist id="mdl-${escapeHtml(f.id)}">${opts.join("")}</datalist>`;
       });
-      // Families datalist for the (manually-typeable) family combobox.
+
+      // The family combobox only lists the canonical (non-absorbed) families.
+      const dropdownFamilies = families.filter((f) => !absorbed.has(f.id));
       dlHtml +=
         `<datalist id="margin-families">` +
-        (data.families || [])
+        dropdownFamilies
           .map((f) => `<option value="${escapeHtml(f.name)}"></option>`)
           .join("") +
         `</datalist>`;
       $("#margin-datalists").innerHTML = dlHtml;
       marginCatalog = {
-        families: (data.families || []).map((f) => ({ id: f.id, name: f.name })),
+        families: dropdownFamilies.map((f) => ({ id: f.id, name: f.name })),
         byFamily,
         familyIdByName,
       };
@@ -1440,23 +1459,57 @@
     return det ? det.scenario : sid || "";
   }
 
+  // Map a BOQ line to its catalog family id. The data-package product_id encodes
+  // the family (e.g. PROD_PF_GIS_PD_01 -> PF_GIS_PD); fall back to matching the
+  // line's product family description against the catalog family names.
+  function marginFamilyIdFromBoqItem(item) {
+    const pid = (item.product_id || "").trim();
+    const m = pid.match(/^PROD_(PF_[A-Z0-9_]+?)_\d+$/);
+    if (m && marginCatalog.byFamily[m[1]]) return m[1];
+    return marginFamilyIdFromName(item.description || "");
+  }
+
   function marginAutofillFromBoq(boq) {
     boq = boq || currentExtraction;
     if (!boq || !(boq.lineItems || []).length) return false;
+    const cur = $("#margin-currency").value;
     $("#margin-project").value = boq.caseReference || boq.boqId || "";
     marginState.id = null;
     marginState.selectedDiscount = null;
     marginState.lines = boq.lineItems.map((item) => {
-      const sid = item.technicalParams && item.technicalParams.scenario;
-      return {
-        description: item.description || item.productCode || "",
-        family: sid ? marginScenarioName(boq, sid) : "",
-        productCode: item.productCode || item.product_model || "",
+      // Use the resolved model name only; never surface a raw PROD_* id.
+      const model = item.product_model || "";
+      const familyId = marginFamilyIdFromBoqItem(item);
+      const fam = familyId ? marginCatalog.byFamily[familyId] : null;
+      const line = {
+        description: model,
+        family: fam ? fam.name : (item.description || ""),
+        familyId: fam ? familyId : "",
+        productCode: model,
         qty: item.quantity || 0,
         unitListPrice: "",
         unitCost: "",
         discountPct: "",
+        catalogRef: null,
       };
+      // Auto-price when the BOQ model exactly matches a catalog model that
+      // carries pricing (covers price-list models folded into the family).
+      if (fam && model) {
+        const want = model.trim().toLowerCase();
+        const rec = Object.values(fam.models).find(
+          (mm) => (mm.model || "").trim().toLowerCase() === want
+        );
+        if (rec) {
+          const lp = rec.listPrice || {};
+          const cc = rec.cost || {};
+          line.catalogRef = { familyId, model: rec.model };
+          line.description = rec.model;
+          line.productCode = rec.partNo || line.productCode;
+          line.unitListPrice = lp[cur] != null ? lp[cur] : lp.USD != null ? lp.USD : "";
+          line.unitCost = cc[cur] != null ? cc[cur] : cc.USD != null ? cc.USD : "";
+        }
+      }
+      return line;
     });
     $("#margin-source").textContent = `From BOQ ${boq.caseReference || boq.boqId || ""}`;
     renderMarginTable();
@@ -1499,49 +1552,89 @@
     renderMarginTable();
   });
 
+  // The "Load saved record" picker is wired to the local case History (the same
+  // cases shown in the History panel) plus any saved margin quotes. Selecting a
+  // case loads its BOQ and auto-fills the calculator; selecting a saved quote
+  // restores that calculator record.
   async function marginRefreshRecords() {
-    if (IS_STATIC) return;
-    try {
-      const data = await apiGet("/margin/records");
-      const sel = $("#margin-load");
-      const opts = ['<option value="">— previous records —</option>'];
-      (data.records || []).forEach((r) => {
-        const gm = r.summary && r.summary.quotedMarginPct != null ? ` · GM ${r.summary.quotedMarginPct}%` : "";
-        opts.push(`<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)} (${escapeHtml(r.savedAt || "")})${gm}</option>`);
+    const sel = $("#margin-load");
+    if (!sel) return;
+    const groups = [];
+
+    const cases = loadHistory();
+    if (cases.length) {
+      const caseOpts = cases.map((c) => {
+        const ex = c.extraction || {};
+        const n = (ex.lineItems || []).length;
+        const when = c.ingestedAt ? new Date(c.ingestedAt).toLocaleDateString() : "";
+        return `<option value="case:${escapeHtml(c.caseId)}">${escapeHtml(c.caseId)} — ${n} line(s)${when ? " · " + escapeHtml(when) : ""}</option>`;
       });
-      sel.innerHTML = opts.join("");
-    } catch (_) {}
+      groups.push(`<optgroup label="Project cases (from History)">${caseOpts.join("")}</optgroup>`);
+    }
+
+    if (!IS_STATIC) {
+      try {
+        const data = await apiGet("/margin/records");
+        const recs = data.records || [];
+        if (recs.length) {
+          const recOpts = recs.map((r) => {
+            const gm = r.summary && r.summary.quotedMarginPct != null ? ` · GM ${r.summary.quotedMarginPct}%` : "";
+            return `<option value="rec:${escapeHtml(r.id)}">${escapeHtml(r.name)} (${escapeHtml(r.savedAt || "")})${gm}</option>`;
+          });
+          groups.push(`<optgroup label="Saved quotes">${recOpts.join("")}</optgroup>`);
+        }
+      } catch (_) {}
+    }
+
+    sel.innerHTML =
+      `<option value="">— load a previous case or quote —</option>` + groups.join("");
+  }
+
+  async function marginLoadSavedRecord(id) {
+    const rec = await apiGet(`/margin/records/${id}`);
+    marginState.id = rec.id || id;
+    marginState.selectedDiscount = null;
+    $("#margin-project").value = rec.caseReference || rec.name || "";
+    $("#margin-currency").value = rec.currency || "USD";
+    const g = rec.globals || {};
+    const setVal = (idAttr, v) => {
+      const el = $("#" + idAttr);
+      if (el) el.value = v;
+    };
+    setVal("margin-discount", g.discountPct != null ? g.discountPct : 0);
+    setVal("margin-freight", g.freight != null ? g.freight : 0);
+    setVal("margin-labour", g.labour != null ? g.labour : 0);
+    setVal("margin-overheads", g.overheads != null ? g.overheads : 0);
+    setVal("margin-fieldservice", g.fieldService != null ? g.fieldService : 0);
+    marginState.lines = (rec.lines || []).map((l) => ({
+      description: l.description || "", family: l.family || "",
+      familyId: l.familyId || "", catalogRef: l.catalogRef || null,
+      productCode: l.productCode || "", qty: l.qty,
+      unitListPrice: l.unitListPrice, unitCost: l.unitCost, discountPct: l.discountPct,
+    }));
+    $("#margin-source").textContent = `Loaded quote ${rec.id || id}`;
+    renderMarginTable();
   }
 
   $("#margin-load").addEventListener("change", async (e) => {
-    const id = e.target.value;
-    if (!id) return;
+    const v = e.target.value;
+    if (!v) return;
     try {
-      const rec = await apiGet(`/margin/records/${id}`);
-      marginState.id = rec.id || id;
-      marginState.selectedDiscount = null;
-      $("#margin-project").value = rec.caseReference || rec.name || "";
-      $("#margin-currency").value = rec.currency || "USD";
-      const g = rec.globals || {};
-      const setVal = (idAttr, v) => {
-        const el = $("#" + idAttr);
-        if (el) el.value = v;
-      };
-      setVal("margin-discount", g.discountPct != null ? g.discountPct : 0);
-      setVal("margin-freight", g.freight != null ? g.freight : 0);
-      setVal("margin-labour", g.labour != null ? g.labour : 0);
-      setVal("margin-overheads", g.overheads != null ? g.overheads : 0);
-      setVal("margin-fieldservice", g.fieldService != null ? g.fieldService : 0);
-      marginState.lines = (rec.lines || []).map((l) => ({
-        description: l.description || "", family: l.family || "",
-        familyId: l.familyId || "", catalogRef: l.catalogRef || null,
-        productCode: l.productCode || "", qty: l.qty,
-        unitListPrice: l.unitListPrice, unitCost: l.unitCost, discountPct: l.discountPct,
-      }));
-      $("#margin-source").textContent = `Loaded record ${rec.id || id}`;
-      renderMarginTable();
+      if (v.startsWith("case:")) {
+        const caseId = v.slice(5);
+        const record = loadHistory().find((c) => c.caseId === caseId);
+        if (!record || !record.extraction) {
+          alert("That case is no longer in local history.");
+          return;
+        }
+        renderExtraction(record.extraction); // sets currentExtraction + syncs Step 2
+        marginAutofillFromBoq(record.extraction);
+        $("#margin-source").textContent = `From case ${caseId}`;
+      } else if (v.startsWith("rec:")) {
+        await marginLoadSavedRecord(v.slice(4));
+      }
     } catch (err) {
-      alert("Failed to load record: " + err.message);
+      alert("Failed to load selection: " + err.message);
     }
   });
 
@@ -1612,6 +1705,7 @@
   // Opening the Configure & Quote tab carries over the reviewed BOQ when the
   // calculator is still empty (master's nav has no explicit hand-off button).
   document.querySelector('.tab-btn[data-tab="margin"]')?.addEventListener("click", () => {
+    marginRefreshRecords(); // keep the case/quote picker in sync with History
     if (!marginState.lines.length) marginAutofillFromBoq();
   });
 
