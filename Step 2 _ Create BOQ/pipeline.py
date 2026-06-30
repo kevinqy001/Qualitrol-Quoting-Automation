@@ -19,6 +19,7 @@ Outputs: Product Matching (sheet 15), Draft BOQ (sheet 16) and Missing Info
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,24 @@ from qualitrol_core.schemas import (  # noqa: E402
     MissingInfoQuestion,
     ProductMatch,
 )
+
+# Operator-editable, plain-text rules injected into the Step 2 LLM prompts.
+# Edit this file to tune match explanations / clarification questions without
+# touching code; an env var override lets you point at a different rule set per
+# run. Empty/missing = no extra instructions (pure default behaviour).
+BOQ_RULES_FILE = config.STEP2_DIR / "boq_rules.md"
+
+
+def load_boq_rules() -> str:
+    """Return operator-provided extra LLM instructions for Step 2 (or "")."""
+    override = os.getenv("QUALITROL_STEP2_RULES_FILE")
+    path = Path(override) if override else BOQ_RULES_FILE
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +554,8 @@ def _build_project_summary(detected: list[dict], requirements: list[dict],
 
 
 def _apply_match_explanations(matches: list[ProductMatch], detected: list[dict],
-                              dp: DataPackage, client, project_summary: dict) -> bool:
+                              dp: DataPackage, client, project_summary: dict,
+                              extra_instructions: str = "") -> bool:
     compact = []
     for m in matches:
         sid = _scenario_for_family(m.family_id, detected, dp)
@@ -545,7 +565,9 @@ def _apply_match_explanations(matches: list[ProductMatch], detected: list[dict],
             "scenario_id": sid, "capability_known": capability_known,
             "match_score": m.match_score,
         })
-    explanations = llm_extract.explain_matches(client, project_summary, compact)
+    explanations = llm_extract.explain_matches(
+        client, project_summary, compact, extra_instructions=extra_instructions
+    )
     if not explanations:
         return False
     for m in matches:
@@ -583,11 +605,13 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
 
     # --- LLM augmentation: enrich match recommendations / risks before BOQ ---
     client = llm.get_client()
+    extra_rules = load_boq_rules()
     llm_used = False
     project_summary = _build_project_summary(detected, requirements, asset_counts)
     if client.available and matches:
         llm_used = _apply_match_explanations(
-            matches, detected, dp, client, project_summary
+            matches, detected, dp, client, project_summary,
+            extra_instructions=extra_rules,
         ) or llm_used
 
     boq, boq_summary, quantity_gaps = generate_boq(
@@ -608,7 +632,9 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     # --- LLM augmentation: suggest any additional clarification questions ---
     if client.available and matches:
         existing_q = [q.question for q in missing]
-        extra = llm_extract.suggest_missing_info(client, project_summary, existing_q)
+        extra = llm_extract.suggest_missing_info(
+            client, project_summary, existing_q, extra_instructions=extra_rules
+        )
         if extra:
             llm_used = True
             seen = {(q.scenario_id, q.missing_item.lower()) for q in missing}
@@ -654,6 +680,7 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
             "used": llm_used,
             "provider": config.SETTINGS.llm_provider,
             "model": config.SETTINGS.llm_deployment if client.available else None,
+            "extra_rules_applied": bool(extra_rules),
         },
         "information_complete": information_complete,
         "decision": decision,

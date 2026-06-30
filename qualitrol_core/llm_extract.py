@@ -68,8 +68,13 @@ def build_context(docs: list[ParsedDocument], max_chars: int = 9000) -> str:
 # Step 1 - scenario refinement
 # --------------------------------------------------------------------------- #
 def refine_scenarios(client, dp, evidence: list, detected: list[dict],
+                     docs: Optional[list[ParsedDocument]] = None,
                      extra_instructions: str = "") -> Optional[list[dict]]:
     """Confirm / drop / add application scenarios.
+
+    ``docs`` (optional) gives the LLM the raw document context so it can detect
+    scenarios directly from the text even when the deterministic keyword engine
+    found nothing (e.g. a quantity-summary table that only says "380kV GIS").
 
     ``extra_instructions`` (optional) injects operator-defined precision rules
     into the system prompt (e.g. disambiguation guidance for noisy keywords).
@@ -105,16 +110,26 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
         "list of application scenarios. Be precise: only mark a scenario in scope if "
         "the evidence genuinely supports it. Watch for false positives, e.g. mentions "
         "of current/voltage transformers (CT/VT) in a switchgear drawing do NOT imply "
-        "power-transformer monitoring. Respond with STRICT JSON only."
+        "power-transformer monitoring. The keyword engine can MISS scenarios when a "
+        "document uses only short/implicit terms (e.g. a sensor-quantity table that "
+        "just says '380kV GIS' with sensor counts implies GIS partial-discharge "
+        "monitoring); use the document text to recover those. Respond with STRICT "
+        "JSON only."
     )
     system = _with_extra_rules(system, extra_instructions)
+    doc_context = build_context(docs) if docs else ""
     user = (
         "Controlled scenario catalog:\n"
         + json.dumps(catalog, ensure_ascii=False)
         + "\n\nRules-based candidate scenarios (with evidence snippets):\n"
         + json.dumps(candidates, ensure_ascii=False)
-        + "\n\nTask: Decide which scenarios are truly in scope. You may add a catalog "
-        "scenario not in the candidates if the evidence clearly implies it. "
+        + (("\n\nDocument text (authoritative source — use it to confirm, drop, or "
+            "ADD scenarios the keyword engine missed):\n" + doc_context)
+           if doc_context else "")
+        + "\n\nTask: Decide which scenarios are truly in scope. Add a catalog "
+        "scenario not in the candidates when the document text clearly implies it "
+        "(cite the trigger in the rationale). Only include scenarios the evidence "
+        "or document text genuinely supports. "
         'Return JSON: {"scenarios":[{"scenario_id":"...","in_scope":true,'
         '"confidence":0.0-1.0,"rationale":"one sentence"}]}'
     )
@@ -122,7 +137,11 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
     data = client.complete_json(system, user)
     if not isinstance(data, dict) or "scenarios" not in data:
         return None
-    out: list[dict] = []
+    # The model occasionally emits the SAME scenario_id twice (e.g. a real
+    # judgment plus a junk "duplicate placeholder" row). Collapse duplicates,
+    # keeping the strongest judgment: prefer in_scope=true, then higher
+    # confidence — so a stray placeholder cannot drop a genuine scenario.
+    best: dict[str, dict] = {}
     valid_ids = set(dp.scenarios.keys())
     for item in data.get("scenarios", []):
         sid = str(item.get("scenario_id", "")).strip()
@@ -132,13 +151,18 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
             conf = float(item.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
-        out.append({
+        conf = max(0.0, min(1.0, conf))
+        in_scope = bool(item.get("in_scope", True))
+        candidate = {
             "scenario_id": sid,
-            "in_scope": bool(item.get("in_scope", True)),
-            "confidence": max(0.0, min(1.0, conf)),
+            "in_scope": in_scope,
+            "confidence": conf,
             "rationale": str(item.get("rationale", "")).strip(),
-        })
-    return out or None
+        }
+        prev = best.get(sid)
+        if prev is None or (in_scope, conf) > (prev["in_scope"], prev["confidence"]):
+            best[sid] = candidate
+    return list(best.values()) or None
 
 
 # --------------------------------------------------------------------------- #
@@ -260,8 +284,14 @@ def _scenario_metric_ids(scenario, dp) -> list[str]:
 # Step 2 - match explanation
 # --------------------------------------------------------------------------- #
 def explain_matches(client, project_summary: dict,
-                    matches: list[dict]) -> Optional[dict]:
-    """Return {family_id: {recommendation, gap_or_risk}} or None."""
+                    matches: list[dict],
+                    extra_instructions: str = "") -> Optional[dict]:
+    """Return {family_id: {recommendation, gap_or_risk}} or None.
+
+    ``extra_instructions`` (optional) injects operator-defined review rules into
+    the system prompt (e.g. how aggressively to flag TBD capability, house style
+    for recommendations).
+    """
     if not client.available or not matches:
         return None
 
@@ -278,6 +308,7 @@ def explain_matches(client, project_summary: dict,
         "to resolve before quoting. Note when product model/capability data is TBD and "
         "must be validated. Respond with STRICT JSON only."
     )
+    system = _with_extra_rules(system, extra_instructions)
     user = (
         "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
         + "\n\nCandidate families:\n" + json.dumps(compact, ensure_ascii=False)
@@ -303,8 +334,13 @@ def explain_matches(client, project_summary: dict,
 # Step 2 - extra clarification questions
 # --------------------------------------------------------------------------- #
 def suggest_missing_info(client, project_summary: dict,
-                         existing_items: list[str]) -> Optional[list[dict]]:
-    """Suggest additional clarification questions. Returns list of dicts or None."""
+                         existing_items: list[str],
+                         extra_instructions: str = "") -> Optional[list[dict]]:
+    """Suggest additional clarification questions. Returns list of dicts or None.
+
+    ``extra_instructions`` (optional) injects operator-defined rules into the
+    system prompt (e.g. preferred owners, question phrasing, topics to avoid).
+    """
     if not client.available:
         return None
     system = (
@@ -312,6 +348,7 @@ def suggest_missing_info(client, project_summary: dict,
         "questions that are genuinely needed to finalize the BOQ and are NOT already "
         "covered. Be specific and few (max 4). Respond with STRICT JSON only."
     )
+    system = _with_extra_rules(system, extra_instructions)
     user = (
         "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
         + "\n\nQuestions already raised:\n" + json.dumps(existing_items, ensure_ascii=False)
@@ -447,6 +484,195 @@ def extract_sld_assets_vlm(
                 notes=(
                     f"Identified by Claude Vision from SLD image. Evidence: {evidence}. "
                     "Confirm scope and quantity with engineering before use in BOQ."
+                ),
+            )
+        )
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
+# Step 1 - two-stage multi-sheet SLD understanding (classify -> reconcile)
+# --------------------------------------------------------------------------- #
+_VALID_PAGE_TYPES = {"diagram", "legend", "spec_table", "mixed", "other"}
+
+
+def analyze_sld_page(
+    client,
+    image_b64: str,
+    drawing_id: str,
+    page_label: str,
+    extra_instructions: str = "",
+) -> Optional[dict]:
+    """Stage 1: classify ONE SLD page and extract the payload matching its type.
+
+    Returns a dict ``{page, page_type, title, voltage_level, assets, spec_rows,
+    legend, notes}`` or ``None``. Diagram pages populate ``assets``; data/schedule
+    pages populate ``spec_rows`` (parameters, NOT physical assets); key/notes
+    pages populate ``legend`` + ``notes``. The downstream ``reconcile_sld_assets``
+    fuses these across pages so a legend/spec sheet (e.g. a CT/VT schedule on the
+    last page) informs and constrains the diagram pages instead of inflating the
+    physical asset count.
+    """
+    if not client.available:
+        return None
+
+    asset_types = ", ".join(sorted(_VALID_ASSET_TYPES))
+    system = (
+        "You are a senior power-systems engineer analysing ONE page of a multi-sheet "
+        "Single Line Diagram (SLD) set for a Qualitrol monitoring quotation. FIRST "
+        "classify the page, THEN extract only the payload that matches its type.\n\n"
+        "page_type (exactly one of): 'diagram' (single-line/gas schematic with equipment "
+        "symbols), 'legend' (symbol key / general notes), 'spec_table' (tabular technical "
+        "data: CT/VT/SA ratings, SF6 pressures, parameter schedules), 'mixed', 'other'.\n\n"
+        f"DIAGRAM/MIXED -> list physical assets in 'assets' using EXACT asset_type strings: "
+        f"{asset_types}. status one of New, Existing, Future, Provision, Unclear "
+        "(greyed/dashed/'FUTURE'/'PROVISION' => Future/Provision).\n"
+        "SPEC_TABLE/MIXED -> put the parameter schedule in 'spec_rows'; each row "
+        "{item, category, applies_to, rating, class_or_type, quantity, unit}. These are "
+        "PARAMETERS, not physical assets. 'applies_to' = the bay/feeder/asset it references.\n"
+        "LEGEND/MIXED -> put symbol meanings in 'legend' {symbol, meaning} and general "
+        "'notes'.\n\n"
+        "Keep every string short. Respond with STRICT JSON only — no markdown."
+    )
+    system = _with_extra_rules(system, extra_instructions)
+    user = (
+        f"This is sheet '{page_label}'. Classify it and extract its payload. Return JSON: "
+        '{"page_type":"...","title":"...","voltage_level":"...",'
+        '"assets":[{"asset_tag":"...","asset_type":"...","voltage_level":"...",'
+        '"drawing_area":"...","status":"...","quantity":1,"evidence":"..."}],'
+        '"spec_rows":[{"item":"...","category":"...","applies_to":"...","rating":"...",'
+        '"class_or_type":"...","quantity":1,"unit":"..."}],'
+        '"legend":[{"symbol":"...","meaning":"..."}],"notes":["..."]}'
+    )
+    data = client.complete_json_with_image(system, user, image_b64, max_tokens=8192)
+    if not isinstance(data, dict):
+        return None
+    page_type = str(data.get("page_type", "")).strip().lower()
+    if page_type not in _VALID_PAGE_TYPES:
+        page_type = "diagram"  # default: treat as a diagram so assets are kept
+    data["page_type"] = page_type
+    data.setdefault("page", page_label)
+    return data
+
+
+def reconcile_sld_assets(
+    client,
+    drawing_id: str,
+    project_id: str,
+    pages: list[dict],
+    extra_instructions: str = "",
+) -> Optional[list[DrawingAsset]]:
+    """Stage 2: fuse all per-page payloads into ONE authoritative asset list.
+
+    Uses the legend to interpret symbols, treats spec tables as parameters /
+    cross-checks (not extra physical assets), deduplicates assets seen on several
+    sheets, separates in-scope from Future/Provision, and emits per
+    (asset_type, status) COUNT rows with a justification. Returns ``DrawingAsset``
+    objects or ``None`` (caller falls back to per-page assets).
+    """
+    if not client.available or not pages:
+        return None
+
+    diagram_assets: list[dict] = []
+    spec_rows: list[dict] = []
+    legend: list[dict] = []
+    notes: list[str] = []
+    for p in pages:
+        page = p.get("page")
+        for a in p.get("assets", []) or []:
+            diagram_assets.append({
+                "page": page,
+                "tag": str(a.get("asset_tag", ""))[:40],
+                "type": str(a.get("asset_type", "")),
+                "v": str(a.get("voltage_level", "")),
+                "area": str(a.get("drawing_area", ""))[:40],
+                "status": str(a.get("status", "Unclear")),
+            })
+        for s in p.get("spec_rows", []) or []:
+            spec_rows.append({
+                "page": page,
+                "item": str(s.get("item", ""))[:40],
+                "cat": str(s.get("category", ""))[:30],
+                "applies_to": str(s.get("applies_to", ""))[:40],
+                "rating": str(s.get("rating", ""))[:40],
+                "type": str(s.get("class_or_type", ""))[:30],
+                "qty": s.get("quantity"),
+                "unit": str(s.get("unit", ""))[:12],
+            })
+        for lg in p.get("legend", []) or []:
+            legend.append({
+                "symbol": str(lg.get("symbol", ""))[:24],
+                "meaning": str(lg.get("meaning", ""))[:80],
+            })
+        for n in (p.get("notes", []) or []):
+            notes.append(str(n)[:140])
+
+    asset_types = ", ".join(sorted(_VALID_ASSET_TYPES))
+    system = (
+        "You are a senior Qualitrol application engineer reconciling a multi-sheet SLD "
+        "into ONE authoritative drawing asset list for BOQ sizing. You are given, pooled "
+        "across all pages: raw diagram assets, spec-table rows, the legend, and notes.\n\n"
+        "Rules:\n"
+        "1. Use the LEGEND to interpret ambiguous symbols/abbreviations on diagram pages.\n"
+        "2. Diagram bay/equipment symbols are the source of PHYSICAL counts. Spec tables "
+        "are PARAMETERS and a cross-check — a CT/VT schedule listing many cores/classes "
+        "does NOT mean that many physical assets; do NOT turn schedule rows into assets.\n"
+        "3. Deduplicate the same physical asset appearing on multiple sheets.\n"
+        "4. Separate in-scope (New/Existing) from Future/Provision into distinct rows.\n"
+        "5. Attach a representative rating and monitoring_zone per asset type when the "
+        "spec/legend supports it; map connected_to (e.g. which bay a sensor serves).\n"
+        "6. Output per (asset_type, status) COUNT rows — NOT per tag. Use EXACT asset_type "
+        f"strings: {asset_types}. status one of New, Existing, Future, Provision. In "
+        "'basis', justify the count and flag any diagram-vs-spec discrepancy. Respond with "
+        "STRICT JSON only."
+    )
+    system = _with_extra_rules(system, extra_instructions)
+    user = (
+        "Diagram assets (raw, per page):\n" + json.dumps(diagram_assets, ensure_ascii=False)
+        + "\n\nSpec-table rows (parameters / schedules):\n" + json.dumps(spec_rows, ensure_ascii=False)
+        + "\n\nLegend:\n" + json.dumps(legend, ensure_ascii=False)
+        + "\n\nNotes:\n" + json.dumps(notes, ensure_ascii=False)
+        + '\n\nReturn JSON: {"assets":[{"asset_type":"...","voltage_level":"...",'
+        '"status":"New","quantity":0,"rating":"...","monitoring_zone":"...",'
+        '"connected_to":"...","basis":"..."}]}'
+    )
+    data = client.complete_json(system, user, max_tokens=4096)
+    if not isinstance(data, dict) or "assets" not in data:
+        return None
+
+    out: list[DrawingAsset] = []
+    for item in data.get("assets", []):
+        atype = str(item.get("asset_type", "")).strip()
+        if atype not in _VALID_ASSET_TYPES:
+            continue
+        status = str(item.get("status", "Unclear")).strip().title()
+        if status not in _VALID_STATUS:
+            status = "Unclear"
+        try:
+            qty = float(item.get("quantity", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:
+            continue
+        zone = str(item.get("monitoring_zone", "")).strip()
+        out.append(
+            DrawingAsset(
+                project_id=project_id,
+                drawing_id=drawing_id,
+                asset_tag="",
+                asset_type=atype,
+                voltage_level=str(item.get("voltage_level", "")).strip(),
+                rating=str(item.get("rating", "")).strip(),
+                quantity=qty,
+                connected_to=str(item.get("connected_to", "")).strip(),
+                monitoring_zone=zone,
+                source_location=f"{drawing_id} (VLM reconciled across {len(pages)} sheets)",
+                confidence=0.7,
+                drawing_area=zone,
+                status=status,
+                notes=(
+                    "Reconciled from multi-sheet SLD (legend + spec tables applied). "
+                    + str(item.get("basis", "")).strip()
                 ),
             )
         )

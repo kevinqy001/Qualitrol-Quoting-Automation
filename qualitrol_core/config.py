@@ -19,10 +19,9 @@ DATA_PACKAGE_PATH: Path = REPO_ROOT / "Qualitrol_BOQ_Matching_Data_Package.xlsx"
 STEP0_DIR: Path = REPO_ROOT / "Step 0 _ Tavily Search"
 STEP1_DIR: Path = REPO_ROOT / "Step 1 _ Extract Info"
 STEP2_DIR: Path = REPO_ROOT / "Step 2 _ Create BOQ"
+STEP3_DIR: Path = REPO_ROOT / "Step 3 _ Configure & Quote"
 
-SAMPLE_SUBMISSIONS_DIR: Path = (
-    REPO_ROOT / "Gemba Samples" / "Sample Customer Submissions"
-)
+SAMPLE_SUBMISSIONS_DIR: Path = REPO_ROOT / "Gemba Samples" / "3"
 
 # Default location for pipeline run artifacts (JSON outputs).
 OUTPUT_DIR: Path = REPO_ROOT / "outputs"

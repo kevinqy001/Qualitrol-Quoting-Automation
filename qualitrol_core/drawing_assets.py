@@ -16,10 +16,18 @@ Vision to identify assets with scope judgment; used when text confidence is low.
 
 from __future__ import annotations
 
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from .document_parser import ParsedDocument
 from .schemas import DrawingAsset
+
+# Max SLD pages to send through the vision model per drawing (cost/latency cap).
+MAX_VLM_PAGES = 12
+# Per-page vision calls are independent and I/O-bound, so they run concurrently.
+# Cap the pool so we don't open too many simultaneous API connections.
+MAX_VLM_WORKERS = 6
 
 _VOLTAGE_RE = re.compile(r"(\d{2,4})\s*kV", re.IGNORECASE)
 _GIS_BAY_RE = re.compile(r"=C\d{2}\b")
@@ -394,11 +402,17 @@ def _extract_from_quantity_table(
     return assets
 
 
-def _render_pdf_page_to_b64(file_path: str, page_index: int = 0, dpi: int = 200) -> str:
+def _render_pdf_page_to_b64(
+    file_path: str, page_index: int = 0, dpi: int = 150, max_edge_px: int = 2000
+) -> str:
     """Render a PDF page to a base64-encoded PNG string using PyMuPDF (fitz).
 
     Returns an empty string if PyMuPDF is not installed or rendering fails.
-    The image is downscaled to ``dpi`` (default 200) to keep token costs low
+
+    The render zoom targets ``dpi`` but is capped so the longest edge never
+    exceeds ``max_edge_px``. Large E-size SLD sheets rendered at a high fixed
+    dpi produce images so big that the vision model silently returns an empty
+    result; capping the long edge keeps the image within the model's limits
     while retaining enough detail for tag/symbol identification.
     """
     try:
@@ -412,7 +426,13 @@ def _render_pdf_page_to_b64(file_path: str, page_index: int = 0, dpi: int = 200)
         if page_index >= len(doc):
             page_index = 0
         page = doc[page_index]
+        rect = page.rect
+        longest_pt = max(rect.width, rect.height) or 1.0
         zoom = dpi / 72.0  # 72 dpi is the PDF default
+        # Downscale further when the page is large so the long edge stays within
+        # the vision model's image limits.
+        if longest_pt * zoom > max_edge_px:
+            zoom = max_edge_px / longest_pt
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         png_bytes = pix.tobytes("png")
@@ -422,15 +442,71 @@ def _render_pdf_page_to_b64(file_path: str, page_index: int = 0, dpi: int = 200)
         return ""
 
 
+def _assets_from_page_payloads(
+    pages: list[dict], project_id: str, drawing_id: str
+) -> list[DrawingAsset]:
+    """Fallback builder: assemble per-page diagram assets when reconciliation fails.
+
+    Deduplicates by (asset_type, asset_tag) across pages and ignores spec-table /
+    legend payloads (those only matter in the reconciliation stage).
+    """
+    from . import llm_extract  # local import to avoid circular dependency
+
+    out: list[DrawingAsset] = []
+    seen: set[tuple[str, str]] = set()
+    for p in pages:
+        for a in (p.get("assets", []) or []):
+            atype = str(a.get("asset_type", "")).strip()
+            if atype not in llm_extract._VALID_ASSET_TYPES:
+                continue
+            status = str(a.get("status", "Unclear")).strip().title()
+            if status not in llm_extract._VALID_STATUS:
+                status = "Unclear"
+            try:
+                qty = float(a.get("quantity", 1) or 1)
+            except (TypeError, ValueError):
+                qty = 1.0
+            tag = str(a.get("asset_tag", "")).strip()
+            if tag:
+                key = (atype.lower(), tag.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(
+                DrawingAsset(
+                    project_id=project_id,
+                    drawing_id=drawing_id,
+                    asset_tag=tag,
+                    asset_type=atype,
+                    voltage_level=str(a.get("voltage_level", "")).strip(),
+                    quantity=qty,
+                    source_location=f"{drawing_id} (VLM per-page; reconciliation unavailable)",
+                    confidence=0.7,
+                    drawing_area=str(a.get("drawing_area", "")).strip(),
+                    status=status,
+                    notes=str(a.get("evidence", "")).strip(),
+                )
+            )
+    return out
+
+
 def _extract_from_sld_vlm(
     doc: ParsedDocument, project_id: str, client
 ) -> list[DrawingAsset]:
-    """Optional VLM extraction path: render SLD as image → Claude Vision.
+    """Two-stage multi-sheet VLM extraction: classify each page, then reconcile.
 
-    Uses ``_render_pdf_page_to_b64`` (requires PyMuPDF) to produce a PNG then
-    calls ``llm_extract.extract_sld_assets_vlm``. Falls back to an empty list
-    when the LLM client is unavailable, fitz is not installed, or rendering
-    fails.
+    Stage 1 — render EVERY page (up to ``MAX_VLM_PAGES``) and call
+    ``llm_extract.analyze_sld_page`` to classify it (diagram / legend / spec_table
+    / mixed) and pull the matching payload (assets, parameter rows, legend, notes).
+
+    Stage 2 — ``llm_extract.reconcile_sld_assets`` fuses all pages into one
+    authoritative asset list: the legend interprets symbols, spec tables become
+    parameters/cross-checks (not extra physical assets), duplicates across sheets
+    are collapsed, and Future/Provision is separated from in-scope. If
+    reconciliation fails, falls back to the per-page diagram assets.
+
+    Returns ``[]`` when the LLM client is unavailable, fitz is not installed, or
+    rendering fails.
     """
     from . import llm_extract  # local import to avoid circular dependency
 
@@ -439,45 +515,83 @@ def _extract_from_sld_vlm(
     if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
         return []
 
-    image_b64 = _render_pdf_page_to_b64(doc.file_path)
-    if not image_b64:
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(doc.file_path) as fd:
+            page_count = len(fd)
+    except Exception:
+        page_count = 1
+    page_count = max(1, min(page_count, MAX_VLM_PAGES))
+
+    # Render every page first (fast, CPU-bound, kept sequential).
+    rendered: list[tuple[int, str]] = []
+    for page_index in range(page_count):
+        image_b64 = _render_pdf_page_to_b64(doc.file_path, page_index)
+        if image_b64:
+            rendered.append((page_index, image_b64))
+    if not rendered:
         return []
 
-    result = llm_extract.extract_sld_assets_vlm(
-        client, image_b64, doc.file_name, project_id
+    # Stage 1: classify + typed extraction. Each page is an independent, slow,
+    # I/O-bound vision call (~20-40s), so run them concurrently — this is the
+    # dominant runtime cost for a multi-sheet drawing. Order is preserved.
+    try:
+        workers = int(os.getenv("QUALITROL_VLM_WORKERS", str(MAX_VLM_WORKERS)))
+    except ValueError:
+        workers = MAX_VLM_WORKERS
+    workers = max(1, min(workers, len(rendered)))
+
+    results: list[dict | None] = [None] * len(rendered)
+
+    def _analyze(slot: int) -> None:
+        page_index, image_b64 = rendered[slot]
+        results[slot] = llm_extract.analyze_sld_page(
+            client, image_b64, doc.file_name, f"page {page_index + 1}"
+        )
+
+    if workers == 1:
+        for slot in range(len(rendered)):
+            _analyze(slot)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_analyze, range(len(rendered))))
+
+    pages_payload: list[dict] = [p for p in results if p]
+    if not pages_payload:
+        return []
+
+    # Stage 2: reconcile across pages into an authoritative asset list.
+    reconciled = llm_extract.reconcile_sld_assets(
+        client, doc.file_name, project_id, pages_payload
     )
-    return result or []
+    if reconciled:
+        return reconciled
+
+    # Fallback: per-page diagram assets only (no cross-page reconciliation).
+    return _assets_from_page_payloads(pages_payload, project_id, doc.file_name)
 
 
 def _merge_assets(
     text_assets: list[DrawingAsset], vlm_assets: list[DrawingAsset]
 ) -> list[DrawingAsset]:
-    """Merge text-layer and VLM assets, deduplicating by (asset_type, asset_tag).
+    """Merge text-layer and VLM assets with asset-type-level authority.
 
-    When both sources produce the same asset tag, the VLM result takes
-    precedence (higher confidence) and inherits the text-layer's notes if the
-    VLM notes are empty.
+    When the VLM produced any asset of a given type, it is treated as the
+    authoritative source for that whole type (it has richer scope-status
+    judgment and reads symbols the text layer cannot). Text-layer assets are
+    kept only for types the VLM did not cover at all. This avoids double-counting
+    the same physical assets (e.g. GIS bays found by both the ``=Cxx`` regex and
+    the vision model under different tag formats).
     """
     if not vlm_assets:
         return text_assets
     if not text_assets:
         return vlm_assets
 
-    # Index text assets for fast lookup.
-    text_index: dict[tuple[str, str], DrawingAsset] = {}
-    for a in text_assets:
-        key = (a.asset_type.lower(), a.asset_tag.lower())
-        text_index[key] = a
-
-    merged = list(vlm_assets)
-    vlm_keys = {(a.asset_type.lower(), a.asset_tag.lower()) for a in vlm_assets}
-
-    for a in text_assets:
-        key = (a.asset_type.lower(), a.asset_tag.lower())
-        if key not in vlm_keys:
-            merged.append(a)
-
-    return merged
+    vlm_types = {a.asset_type for a in vlm_assets}
+    kept_text = [a for a in text_assets if a.asset_type not in vlm_types]
+    return list(vlm_assets) + kept_text
 
 
 def _text_confidence_avg(assets: list[DrawingAsset]) -> float:
@@ -518,24 +632,25 @@ def extract_drawing_assets(
         if doc.doc_type == "Drawing / SLD":
             # Step 1: legacy GIS bay / PD sensor extraction.
             legacy = _extract_from_sld_pdf(doc, project_id)
-            assets.extend(legacy)
 
             # Step 2: enhanced text extraction (CB / TR / Bus / PCC / Feeder).
             enhanced = _extract_from_sld_text_enhanced(doc, project_id)
+            text_assets = legacy + enhanced
 
-            # Step 3: optional VLM augmentation.
+            # Step 3: VLM augmentation. Drawings are the whole point of the
+            # vision path, so run it whenever an LLM client is available; the
+            # text layer remains the fallback. Opt out with QUALITROL_SLD_VLM=0.
             vlm: list[DrawingAsset] = []
-            if llm_client is not None:
-                # Use VLM when text confidence is low or no new asset types found.
-                new_types = {a.asset_type for a in enhanced}
-                important_types = {"Circuit Breaker", "Transformer", "Bus", "PCC"}
-                low_confidence = _text_confidence_avg(enhanced) < 0.5
-                missing_important = not (important_types & new_types)
-                if low_confidence or missing_important:
-                    vlm = _extract_from_sld_vlm(doc, project_id, llm_client)
+            vlm_enabled = (
+                llm_client is not None
+                and getattr(llm_client, "available", False)
+                and os.getenv("QUALITROL_SLD_VLM", "1") != "0"
+            )
+            if vlm_enabled:
+                vlm = _extract_from_sld_vlm(doc, project_id, llm_client)
 
-            # Merge enhanced + VLM (VLM wins on duplicates).
-            sld_assets = _merge_assets(enhanced, vlm)
+            # Merge text + VLM (VLM is authoritative for the types it covers).
+            sld_assets = _merge_assets(text_assets, vlm)
             assets.extend(sld_assets)
 
         # Step 4: quantity tables in any document type.

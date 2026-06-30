@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Make the shared core importable when run as a standalone script.
@@ -556,15 +557,29 @@ def run(
     extra_rules = load_extraction_rules()
     llm_used = False
     llm_dropped: list[dict] = []
-    if client.available:
-        refinement = llm_extract.refine_scenarios(
-            client, dp, evidence, detected, extra_instructions=extra_rules
-        )
-        if refinement:
-            llm_used = True
-            detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
 
-    drawing_assets = extract_drawing_assets(docs, project_id, llm_client=client)
+    # Scenario refinement (text LLM) and drawing-asset extraction (vision LLM)
+    # are independent — neither consumes the other's output — so run them
+    # concurrently. The scenario-refinement latency is then hidden behind the
+    # slower (vision) drawing extraction instead of adding to it.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        refine_future = (
+            pool.submit(
+                llm_extract.refine_scenarios, client, dp, evidence, detected,
+                docs=docs, extra_instructions=extra_rules,
+            )
+            if client.available
+            else None
+        )
+        assets_future = pool.submit(
+            extract_drawing_assets, docs, project_id, client
+        )
+        drawing_assets = assets_future.result()
+        refinement = refine_future.result() if refine_future else None
+
+    if refinement:
+        llm_used = True
+        detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
     requirements = extract_requirements(
         docs, evidence, detected, drawing_assets, dp, project_id
     )
