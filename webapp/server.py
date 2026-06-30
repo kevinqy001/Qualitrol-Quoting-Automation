@@ -918,7 +918,10 @@ async def regenerate_boq_excel(case_id: str, payload: BoqEditPayload):
         if ln is not None:
             edits[ln] = item
 
-    for line in step2.get("draft_boq", []):
+    draft = step2.setdefault("draft_boq", [])
+    existing_lines = {line.get("boq_line") for line in draft}
+
+    for line in draft:
         edit = edits.get(line.get("boq_line"))
         if not edit:
             continue
@@ -929,6 +932,24 @@ async def regenerate_boq_excel(case_id: str, payload: BoqEditPayload):
                 line["quantity"] = float(edit["quantity"])
             except (TypeError, ValueError):
                 line["quantity"] = edit["quantity"]
+
+    # Append manually-added lines (a lineNumber that isn't an existing BOQ line).
+    for ln, edit in edits.items():
+        if ln in existing_lines:
+            continue
+        qty = edit.get("quantity")
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            pass
+        draft.append({
+            "boq_line": ln,
+            "product_model": str(edit.get("productCode") or "").strip(),
+            "product_description": "",
+            "quantity": qty,
+            "review_status": "Manual",
+            "quantity_basis": "Manually added line",
+        })
 
     from qualitrol_core import boq_excel
 

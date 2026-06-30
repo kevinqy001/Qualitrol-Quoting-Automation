@@ -1360,7 +1360,7 @@
             <p id="margin-scenario-note" class="section-copy" style="margin-top:10px;"></p>
             <div class="button-row" style="justify-content:flex-end; margin-top:18px;">
               <button class="btn-secondary" id="btn-margin-save" type="button">Save Record</button>
-              <button class="btn-secondary" id="btn-margin-export" type="button">Export Excel</button>
+              <button class="btn-secondary" id="btn-margin-export" type="button" style="display:none;">Export Excel</button>
             </div>
             <p id="margin-status" class="section-copy" style="margin-top:8px;"></p>
           </div>
@@ -1508,10 +1508,13 @@
   <div id="edit-boq-modal" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="edit-boq-title">
     <div class="history-panel">
       <div class="history-head">
-        <div>
+        <div style="flex:1;">
           <p class="section-kicker" style="margin-bottom:4px;">Edit</p>
           <h2 class="section-heading" id="edit-boq-title">Edit BOQ — Product Code &amp; Qty</h2>
-          <p class="section-copy">Manually adjust the auto-generated product codes and quantities for this case.</p>
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+            <p class="section-copy" style="margin:0;">Manually adjust the auto-generated product codes and quantities for this case.</p>
+            <button id="btn-edit-addline" class="btn-secondary" type="button" style="min-height:34px; flex:0 0 auto; white-space:nowrap;">+ Add a line</button>
+          </div>
         </div>
         <button id="btn-edit-close" class="file-pill-remove" type="button" aria-label="Close editor" style="width:34px;height:34px;">×</button>
       </div>
@@ -1526,6 +1529,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

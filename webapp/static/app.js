@@ -604,6 +604,36 @@
     buildEditRows(originalLineItems || []);
   }
 
+  // Read the current editor inputs back into the given items array (by row
+  // index), so typed-but-unsaved values survive a re-render (add line / etc.).
+  function readEditRowsInto(items) {
+    $("#edit-boq-list").querySelectorAll(".edit-pc").forEach((inp) => {
+      const i = Number(inp.dataset.i);
+      if (items[i]) items[i].productCode = inp.value.trim();
+    });
+    $("#edit-boq-list").querySelectorAll(".edit-qty").forEach((inp) => {
+      const i = Number(inp.dataset.i);
+      if (!items[i]) return;
+      const v = inp.value.trim();
+      const num = Number(v);
+      items[i].quantity = v !== "" && Number.isFinite(num) ? num : v;
+    });
+  }
+
+  function addEditLine() {
+    if (!currentExtraction) return;
+    if (!Array.isArray(currentExtraction.lineItems)) currentExtraction.lineItems = [];
+    const items = currentExtraction.lineItems;
+    readEditRowsInto(items); // preserve any edits already typed into the rows
+    const nextNum =
+      items.reduce((mx, it, i) => Math.max(mx, Number(it.lineNumber) || i + 1), 0) + 1;
+    items.push({ lineNumber: nextNum, productCode: "", description: "", quantity: 1 });
+    buildEditRows(items);
+    // Focus the product-code field of the newly added row.
+    const pcs = $("#edit-boq-list").querySelectorAll(".edit-pc");
+    if (pcs.length) pcs[pcs.length - 1].focus();
+  }
+
   function persistCurrentCaseEdits() {
     // If this case is in local history, update its stored line items so the
     // manual edits survive page reloads and History "View".
@@ -662,17 +692,7 @@
   async function saveEditBoq() {
     if (!currentExtraction) return closeEditBoq();
     const items = currentExtraction.lineItems || [];
-    $("#edit-boq-list").querySelectorAll(".edit-pc").forEach((inp) => {
-      const i = Number(inp.dataset.i);
-      if (items[i]) items[i].productCode = inp.value.trim();
-    });
-    $("#edit-boq-list").querySelectorAll(".edit-qty").forEach((inp) => {
-      const i = Number(inp.dataset.i);
-      if (!items[i]) return;
-      const v = inp.value.trim();
-      const num = Number(v);
-      items[i].quantity = v !== "" && Number.isFinite(num) ? num : v;
-    });
+    readEditRowsInto(items);
     renderBoqTable(items);       // refresh the Step 2 BOQ table
     persistCurrentCaseEdits();   // persist into local history when applicable
 
@@ -685,6 +705,7 @@
 
   $("#btn-edit-boq").addEventListener("click", openEditBoq);
   $("#btn-edit-close").addEventListener("click", closeEditBoq);
+  $("#btn-edit-addline").addEventListener("click", addEditLine);
   $("#btn-edit-reset").addEventListener("click", resetEditBoq);
   $("#btn-edit-save").addEventListener("click", saveEditBoq);
   $("#edit-boq-modal").addEventListener("click", (e) => {
