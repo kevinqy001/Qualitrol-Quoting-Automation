@@ -946,11 +946,13 @@
           (ln.familyId && marginCatalog.byFamily[ln.familyId]
             ? marginCatalog.byFamily[ln.familyId].name
             : "");
+        const clearBtn = (kind) =>
+          `<button type="button" data-clear="${kind}" data-i="${i}" title="Clear field" tabindex="-1" style="flex:none; width:26px; height:30px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; color:var(--muted); font-size:16px; line-height:1; padding:0;">×</button>`;
         const famInput =
-          `<input class="field-input" style="width:100%; min-width:210px; padding:6px 8px;" data-i="${i}" data-f="familyName" list="margin-families" value="${escapeHtml(famVal)}" placeholder="select or type a family" />`;
+          `<div style="display:flex; align-items:center; gap:5px;"><input class="field-input" style="flex:1; min-width:180px; padding:6px 8px;" data-i="${i}" data-f="familyName" list="margin-families" value="${escapeHtml(famVal)}" placeholder="select or type a family" />${clearBtn("family")}</div>`;
         const listAttr = ln.familyId ? ` list="mdl-${escapeHtml(ln.familyId)}"` : "";
         const modelInp =
-          `<input class="field-input" style="width:100%; min-width:330px; padding:6px 8px;" data-i="${i}" data-f="model"${listAttr} value="${escapeHtml(ln.description == null ? "" : ln.description)}" placeholder="${ln.familyId ? "type to search a model…" : "type a model or description"}" />` +
+          `<div style="display:flex; align-items:center; gap:5px;"><input class="field-input" style="flex:1; min-width:300px; padding:6px 8px;" data-i="${i}" data-f="model"${listAttr} value="${escapeHtml(ln.description == null ? "" : ln.description)}" placeholder="${ln.familyId ? "type to search a model…" : "type a model or description"}" />${clearBtn("model")}</div>` +
           (ln.productCode ? `<div style="font-size:11px; color:var(--muted); margin-top:3px;">${escapeHtml(ln.productCode)}</div>` : "");
         return `<tr data-row="${i}">
           <td style="min-width:220px;">${famInput}</td>
@@ -1018,6 +1020,26 @@
     }
   });
   $("#margin-table-body").addEventListener("click", (e) => {
+    const clearBtn = e.target.closest("[data-clear]");
+    if (clearBtn) {
+      const line = marginState.lines[Number(clearBtn.dataset.i)];
+      if (!line) return;
+      if (clearBtn.dataset.clear === "family") {
+        // Clearing the family also clears the dependent model/description.
+        line.family = "";
+        line.familyId = "";
+        line.catalogRef = null;
+        line.description = "";
+        line.productCode = "";
+      } else if (clearBtn.dataset.clear === "model") {
+        line.description = "";
+        line.productCode = "";
+        line.catalogRef = null;
+      }
+      marginState.selectedDiscount = null;
+      renderMarginTable();
+      return;
+    }
     const btn = e.target.closest("[data-remove]");
     if (!btn) return;
     marginState.lines.splice(Number(btn.dataset.remove), 1);
