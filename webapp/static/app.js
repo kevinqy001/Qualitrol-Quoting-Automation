@@ -404,6 +404,7 @@
     currentExtraction = boq;
     originalLineItems = JSON.parse(JSON.stringify(boq.lineItems || []));
     renderBoqTable(boq.lineItems || []);
+    setupFeedback(boq);
   }
 
   function renderBoqTable(lineItems) {
@@ -439,6 +440,103 @@
   }
 
   const renderBoq = renderExtraction;
+
+  // ── BOQ feedback (thumbs up/down + comments), linked to the case/history ID ──
+  function setFbState(overall) {
+    const up = $("#btn-fb-up");
+    const down = $("#btn-fb-down");
+    const status = $("#fb-status");
+    if (up) up.style.outline = overall === "Positive" ? "2px solid #067647" : "";
+    if (down) down.style.outline = overall === "Negative" ? "2px solid #b42318" : "";
+    if (status) {
+      status.textContent =
+        overall === "Positive" ? "Thanks — marked satisfied 👍"
+        : overall === "Negative" ? "Thanks — feedback recorded 👎"
+        : "";
+      status.style.color = overall === "Negative" ? "#b42318" : "#067647";
+    }
+  }
+
+  async function setupFeedback(boq) {
+    const grp = $("#boq-feedback");
+    if (!grp) return;
+    const caseId = boq && (boq.caseReference || boq.boqId);
+    const hasLines = !!(boq && (boq.lineItems || []).length);
+    if (IS_STATIC || !caseId || !hasLines) {
+      grp.classList.add("hidden");
+      return;
+    }
+    grp.classList.remove("hidden");
+    setFbState(null);
+    // Restore any previously submitted feedback for this case.
+    try {
+      const prev = await apiGet(`/feedback/${encodeURIComponent(caseId)}`);
+      if (prev && prev.exists) setFbState(prev.overallFeedback);
+    } catch (_) {}
+  }
+
+  async function submitFeedback(overall, comments) {
+    const caseId =
+      currentExtraction && (currentExtraction.caseReference || currentExtraction.boqId);
+    if (!caseId) return;
+    const items = (currentExtraction.lineItems || []).map((it, i) => ({
+      lineNumber: it.lineNumber ?? i + 1,
+      productCode: it.productCode || "",
+      description: it.description || "",
+      quantity: it.quantity,
+      unit: it.unit || "",
+    }));
+    const status = $("#fb-status");
+    if (status) {
+      status.textContent = "Saving…";
+      status.style.color = "var(--muted)";
+    }
+    try {
+      const res = await fetch(`${API}/feedback/${encodeURIComponent(caseId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          overallFeedback: overall,
+          comments: comments || "",
+          boqId: currentExtraction.boqId || "",
+          items,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setFbState(overall);
+    } catch (err) {
+      if (status) {
+        status.textContent = "Save failed: " + err.message;
+        status.style.color = "#b42318";
+      }
+    }
+  }
+
+  function closeFeedbackModal() {
+    const m = $("#feedback-modal");
+    if (m) m.classList.add("hidden");
+  }
+
+  if ($("#btn-fb-up")) {
+    $("#btn-fb-up").addEventListener("click", () => submitFeedback("Positive", ""));
+  }
+  if ($("#btn-fb-down")) {
+    $("#btn-fb-down").addEventListener("click", () => {
+      const ta = $("#fb-comment");
+      if (ta) ta.value = "";
+      $("#feedback-modal").classList.remove("hidden");
+      setTimeout(() => ta && ta.focus(), 40);
+    });
+  }
+  if ($("#btn-fb-close")) $("#btn-fb-close").addEventListener("click", closeFeedbackModal);
+  if ($("#btn-fb-cancel")) $("#btn-fb-cancel").addEventListener("click", closeFeedbackModal);
+  if ($("#btn-fb-submit")) {
+    $("#btn-fb-submit").addEventListener("click", async () => {
+      const comment = ($("#fb-comment").value || "").trim();
+      await submitFeedback("Negative", comment);
+      closeFeedbackModal();
+    });
+  }
 
   function renderFeatures(features) {
     const labels = {

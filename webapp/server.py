@@ -966,6 +966,94 @@ async def regenerate_boq_excel(case_id: str, payload: BoqEditPayload):
     }
 
 
+# --------------------------------------------------------------------------- #
+# BOQ feedback (thumbs up/down + comments) — linked to the case / history ID
+# so it can be collected later for ML / model tuning. Persisted server-side.
+# --------------------------------------------------------------------------- #
+FEEDBACK_DIR = config.OUTPUT_DIR / "_feedback"
+
+
+@app.post("/api/v1/feedback/{case_id}")
+async def submit_feedback(case_id: str, request: Request):
+    """Store user feedback for a BOQ result, stamped onto every line item.
+
+    Each item in the saved record carries a ``feedback`` (Positive/Negative) and
+    ``comments`` field so the whole BOQ line list is ML-ready and traceable to
+    this case (history) ID.
+    """
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be a feedback object.")
+
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_")) or "UNKNOWN"
+    overall = str(payload.get("overallFeedback", "")).strip().title()
+    if overall not in ("Positive", "Negative"):
+        raise HTTPException(400, "overallFeedback must be 'Positive' or 'Negative'.")
+    comments = str(payload.get("comments", "") or "").strip()
+
+    items = []
+    for it in (payload.get("items") or []):
+        if not isinstance(it, dict):
+            continue
+        items.append({
+            "lineNumber": it.get("lineNumber"),
+            "productCode": it.get("productCode", ""),
+            "description": it.get("description", ""),
+            "quantity": it.get("quantity"),
+            "unit": it.get("unit", ""),
+            "feedback": overall,      # per-item label for ML / tuning
+            "comments": comments,     # per-item comment
+        })
+
+    record = {
+        "caseId": safe,
+        "boqId": payload.get("boqId", f"BOQ-{safe}"),
+        "overallFeedback": overall,
+        "comments": comments,
+        "submittedAt": _now(),
+        "itemCount": len(items),
+        "items": items,
+    }
+
+    # Latest feedback for this case, alongside its step1/step2 outputs.
+    case_dir = config.OUTPUT_DIR / safe
+    case_dir.mkdir(parents=True, exist_ok=True)
+    io_utils.write_json(case_dir / "feedback.json", record)
+
+    # Append to a global collection log (one JSON object per line) for ML.
+    FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(FEEDBACK_DIR / "feedback_log.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    return {
+        "status": "saved",
+        "caseId": safe,
+        "overallFeedback": overall,
+        "submittedAt": record["submittedAt"],
+    }
+
+
+@app.get("/api/v1/feedback/{case_id}")
+async def get_feedback(case_id: str):
+    """Return the latest stored feedback for a case (to restore UI state)."""
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    path = config.OUTPUT_DIR / safe / "feedback.json"
+    if not path.exists():
+        return {"exists": False}
+    try:
+        rec = io_utils.read_json(path)
+    except Exception:
+        return {"exists": False}
+    rec["exists"] = True
+    return rec
+
+
 @app.get("/api/v1/docgen/download/{doc_id}")
 async def download_doc(doc_id: str):
     """Download a previously generated quotation document."""
