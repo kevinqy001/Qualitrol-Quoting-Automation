@@ -357,11 +357,52 @@
   let currentExtraction = null;
   let originalLineItems = null;
 
+  // Split the server's one-paragraph summary into three labelled points:
+  // Project Type · Monitoring Applications · Qualitrol Products. Falls back to
+  // the raw paragraph if the expected markers aren't present.
+  function renderSummaryPoints(summary) {
+    const el = $("#extraction-summary");
+    if (!el) return;
+    const boldify = (s) =>
+      escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    const text = (summary || "").trim();
+    const APP = "Monitoring applications identified:";
+    const CAT = "Qualitrol product categories involved:";
+    const iApp = text.indexOf(APP);
+    const iCat = text.indexOf(CAT);
+
+    if (iApp === -1 || iCat === -1 || iCat < iApp) {
+      el.innerHTML = `<p class="section-copy" style="margin:0;">${boldify(
+        text || "No extraction summary returned."
+      )}</p>`;
+      return;
+    }
+
+    let projectType = text.slice(0, iApp).trim().replace(/\.\s*$/, "");
+    projectType = projectType.replace(/^This is an?\s+/i, "");
+    const applications = text.slice(iApp + APP.length, iCat).trim().replace(/\.\s*$/, "");
+    const products = text.slice(iCat + CAT.length).trim();
+
+    const points = [
+      { title: "Project Type", body: projectType },
+      { title: "Monitoring Applications", body: applications },
+      { title: "Qualitrol Products", body: products },
+    ];
+
+    el.innerHTML = points
+      .filter((p) => p.body)
+      .map(
+        (p, i) => `<div style="margin:${i === 0 ? "0" : "10px"} 0 0;">
+          <p style="margin:0 0 3px; font-size:11px; font-weight:850; letter-spacing:0.08em; text-transform:uppercase; color:var(--ralliant-brown);">${escapeHtml(p.title)}</p>
+          <p class="section-copy" style="margin:0;">${boldify(p.body)}</p>
+        </div>`
+      )
+      .join("");
+  }
+
   function renderExtraction(boq) {
     $("#boq-ref").textContent = boq.boqId || boq.caseReference || "BOQ";
-    $("#extraction-summary").innerHTML = escapeHtml(
-      boq.extractionSummary || "No extraction summary returned."
-    ).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    renderSummaryPoints(boq.extractionSummary);
     renderFeatures(boq.features || {});
     renderMissingInfoQuestions(boq.missingInfoQuestions || []);
     renderRequirements(boq.requirements || []);
@@ -417,12 +458,47 @@
       return;
     }
 
+    // Map scenario_id -> human-readable scenario name (from detected scenarios).
+    const scenarioNames = {};
+    ((currentExtraction && currentExtraction.detectedScenarios) || []).forEach((d) => {
+      if (d && d.scenario_id) {
+        scenarioNames[String(d.scenario_id).trim().toLowerCase()] = d.scenario || "";
+      }
+    });
+
     lineItems.forEach((item, idx) => {
       const params = item.technicalParams || {};
+      const HIDDEN_PARAMS = new Set(["review", "basis", "related"]);
+      // "scenario" is shown as its readable name heading, not the raw code.
+      let scenarioVal = "";
+      Object.entries(params).forEach(([k, v]) => {
+        if (String(k).trim().toLowerCase() === "scenario") {
+          const id = Array.isArray(v) ? v.join(", ") : String(v);
+          scenarioVal = scenarioNames[id.trim().toLowerCase()] || id;
+        }
+      });
+      const scenarioHeading = scenarioVal
+        ? `<div style="font-size:13px; font-weight:750; line-height:1.35; color:var(--ralliant-brown); margin:0 0 6px;">${escapeHtml(scenarioVal)}</div>`
+        : "";
       const chips = Object.entries(params)
+        .filter(([k]) => {
+          const key = String(k).trim().toLowerCase();
+          return !HIDDEN_PARAMS.has(key) && key !== "scenario";
+        })
         .map(([k, v]) => {
-          const val = Array.isArray(v) ? v.join(", ") : String(v);
-          return `<span class="badge" style="margin:0 4px 4px 0;">${escapeHtml(k)}: ${escapeHtml(val)}</span>`;
+          const raw = Array.isArray(v) ? v.join("; ") : String(v);
+          // Multi-value params (e.g. "related") read poorly as one long chip
+          // that wraps mid-text. Break them into one small chip per value,
+          // under a compact label, so they wrap cleanly between chips.
+          const tokens = raw.split(";").map((t) => t.trim()).filter(Boolean);
+          if (tokens.length > 1) {
+            const label = `<span style="font-size:11px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">${escapeHtml(k)}</span>`;
+            const items = tokens
+              .map((t) => `<span class="badge" style="margin:0;">${escapeHtml(t)}</span>`)
+              .join("");
+            return `<span style="display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 8px 6px 0; vertical-align:top;">${label}${items}</span>`;
+          }
+          return `<span class="badge" style="margin:0 4px 4px 0; white-space:normal; word-break:break-word;">${escapeHtml(k)}: ${escapeHtml(raw)}</span>`;
         })
         .join("");
 
@@ -433,7 +509,7 @@
           <td style="font-weight:700;color:var(--ralliant-brown);">${escapeHtml(String(item.productCode ?? ""))}</td>
           <td>${escapeHtml(String(item.description ?? ""))}</td>
           <td class="text-right" style="font-weight:700;">${escapeHtml(String(item.quantity ?? ""))} ${escapeHtml(item.unit || "")}</td>
-          <td>${chips || '<span style="color:var(--muted);">—</span>'}</td>
+          <td>${scenarioHeading}${chips || (scenarioHeading ? "" : '<span style="color:var(--muted);">—</span>')}</td>
         </tr>`
       );
     });
@@ -442,18 +518,28 @@
   const renderBoq = renderExtraction;
 
   // ── BOQ feedback (thumbs up/down + comments), linked to the case/history ID ──
-  function setFbState(overall) {
+  function setFbState(overall, opts) {
+    opts = opts || {};
     const up = $("#btn-fb-up");
     const down = $("#btn-fb-down");
     const status = $("#fb-status");
-    if (up) up.style.outline = overall === "Positive" ? "2px solid #067647" : "";
-    if (down) down.style.outline = overall === "Negative" ? "2px solid #b42318" : "";
-    if (status) {
+    const positive = overall === "Positive";
+    const negative = overall === "Negative";
+    // Selected thumb uses the brand palette; the other side is gently muted.
+    if (up) {
+      up.classList.toggle("selected-up", positive);
+      up.classList.toggle("dim", negative);
+    }
+    if (down) {
+      down.classList.toggle("selected-down", negative);
+      down.classList.toggle("dim", positive);
+    }
+    if (status && !opts.skipStatus) {
       status.textContent =
-        overall === "Positive" ? "Thanks — marked satisfied 👍"
-        : overall === "Negative" ? "Thanks — feedback recorded 👎"
+        positive ? "Thanks — marked satisfied 👍"
+        : negative ? "Thanks — feedback recorded 👎"
         : "";
-      status.style.color = overall === "Negative" ? "#b42318" : "#067647";
+      status.style.color = negative ? "var(--ralliant-orange)" : "var(--success)";
     }
   }
 
@@ -487,8 +573,12 @@
       unit: it.unit || "",
     }));
     const status = $("#fb-status");
+    // Optimistic UI: highlight the chosen thumb instantly and save in the
+    // background, so the interaction feels immediate instead of waiting on the
+    // network round-trip before anything visibly changes.
+    setFbState(overall, { skipStatus: true });
     if (status) {
-      status.textContent = "Saving…";
+      status.innerHTML = `<span class="fb-spinner" aria-hidden="true"></span><span>Saving…</span>`;
       status.style.color = "var(--muted)";
     }
     try {
@@ -503,11 +593,11 @@
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setFbState(overall);
+      setFbState(overall); // swap the "Saving…" hint for the confirmed message
     } catch (err) {
       if (status) {
-        status.textContent = "Save failed: " + err.message;
-        status.style.color = "#b42318";
+        status.textContent = "Couldn't save — please try again";
+        status.style.color = "var(--ralliant-orange)";
       }
     }
   }
@@ -653,6 +743,9 @@
         apiGet("/boq/sample"),
         apiGet("/spec/sample"),
       ]);
+      // Guard against a late-resolving sample fetch clobbering a case the user
+      // already opened (e.g. from History) while this request was in flight.
+      if (currentExtraction) return;
       renderExtraction(boq);
       $("#source-doc").textContent = spec.content;
       $("#source-badge").textContent = spec.fileName;
@@ -817,11 +910,14 @@
     try {
       const data = await apiGet("/poc1/status");
       const llmConfigured = data.llm?.configured;
-      $("#llm-mode-badge").textContent = IS_STATIC
-        ? "GitHub Pages Demo"
-        : llmConfigured
-          ? "LLM Endpoint Connected"
-          : "Local Rules Mode";
+      const llmBadge = $("#llm-mode-badge");
+      if (llmBadge) {
+        llmBadge.textContent = IS_STATIC
+          ? "GitHub Pages Demo"
+          : llmConfigured
+            ? "LLM Endpoint Connected"
+            : "Local Rules Mode";
+      }
       $("#runtime-title").textContent = IS_STATIC
         ? "Static demo — sample data only"
         : llmConfigured
@@ -1054,6 +1150,82 @@
     const n = loadHistory().length;
     const badge = $("#history-count");
     if (badge) badge.textContent = String(n);
+    renderEtaEstimate();
+  }
+
+  // ── Estimated analysis time ────────────────────────────────────────────
+  // Learn a simple size→time model from past runs (each history record stores
+  // fileSizeBytes + processingTimeMs) and project it onto common file sizes.
+  // Falls back to rough defaults until enough real runs have accumulated.
+  function buildEtaModel() {
+    const runs = loadHistory()
+      .map((c) => ({
+        mb: (c.fileSizeBytes || 0) / (1024 * 1024),
+        ms: c.processingTimeMs || 0,
+      }))
+      .filter((r) => r.mb > 0 && r.ms > 0);
+
+    if (!runs.length) {
+      // No measured runs yet — rough defaults, refined once real runs land.
+      return { base: 6000, perMB: 4000, n: 0, avgMb: 0, avgMs: 0 };
+    }
+
+    const n = runs.length;
+    const avgMb = runs.reduce((s, r) => s + r.mb, 0) / n;
+    const avgMs = runs.reduce((s, r) => s + r.ms, 0) / n;
+
+    // A stable linear fit needs ≥2 differing sizes; otherwise scale
+    // proportionally through the origin off the averaged sample.
+    const distinctSizes = new Set(runs.map((r) => r.mb.toFixed(3))).size;
+    if (n >= 2 && distinctSizes >= 2) {
+      const sx = runs.reduce((s, r) => s + r.mb, 0);
+      const sy = runs.reduce((s, r) => s + r.ms, 0);
+      const sxx = runs.reduce((s, r) => s + r.mb * r.mb, 0);
+      const sxy = runs.reduce((s, r) => s + r.mb * r.ms, 0);
+      const denom = n * sxx - sx * sx;
+      let perMB = denom !== 0 ? (n * sxy - sx * sy) / denom : avgMs / avgMb;
+      let base = (sy - perMB * sx) / n;
+      if (!Number.isFinite(perMB) || perMB < 0) perMB = avgMs / avgMb;
+      if (!Number.isFinite(base) || base < 0) base = 0;
+      return { base, perMB, n, avgMb, avgMs };
+    }
+    return { base: 0, perMB: avgMs / avgMb, n, avgMb, avgMs };
+  }
+
+  function etaSecondsForMB(mb, model) {
+    return Math.max(1, (model.base + model.perMB * mb) / 1000);
+  }
+
+  // Round to a friendly, coarse label (nearest 5s, or half-minutes past 60s).
+  function etaRound(seconds) {
+    if (seconds < 60) return `${Math.max(5, Math.round(seconds / 5) * 5)}s`;
+    const mins = Math.round((seconds / 60) * 2) / 2; // nearest 0.5 min
+    return `${mins} min`;
+  }
+
+  // Cache the computed estimate so it isn't recalculated on every UI update;
+  // it only refreshes when the number of measured runs changes (i.e. a new
+  // analysis has landed).
+  let etaCache = null;
+  let etaCacheRuns = null;
+
+  function renderEtaEstimate() {
+    const el = $("#eta-summary");
+    if (!el) return;
+    const runCount = loadHistory().filter(
+      (c) => (c.fileSizeBytes || 0) > 0 && (c.processingTimeMs || 0) > 0
+    ).length;
+    if (etaCache !== null && etaCacheRuns === runCount) {
+      el.textContent = etaCache;
+      return;
+    }
+    const model = buildEtaModel();
+    const lo = etaRound(etaSecondsForMB(0.5, model)); // small file
+    const hi = etaRound(etaSecondsForMB(5, model));   // large file
+    const range = lo === hi ? `about ${lo}` : `about ${lo}–${hi}`;
+    etaCache = `Usually ${range} depending on file size. Scanned PDFs or SLD diagrams may take longer.`;
+    etaCacheRuns = runCount;
+    el.textContent = etaCache;
   }
 
   function renderHistoryList() {
@@ -1149,6 +1321,55 @@
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#history-modal").classList.contains("hidden")) closeHistory();
+  });
+
+  // ── Welcome chooser: start a new case, or continue a saved one ───────────
+  function closeWelcome() {
+    const m = $("#welcome-modal");
+    if (m) m.classList.add("hidden");
+  }
+
+  function showWelcome() {
+    const m = $("#welcome-modal");
+    if (!m) return;
+    const hasCases = loadHistory().length > 0;
+    const contBtn = $("#welcome-continue");
+    const contDesc = $("#welcome-continue-desc");
+    if (contBtn) contBtn.disabled = !hasCases;
+    if (contDesc) {
+      contDesc.textContent = hasCases
+        ? "Reopen a previously analyzed case from your history."
+        : "No saved cases yet — start a new one first.";
+    }
+    m.classList.remove("hidden");
+  }
+
+  function startNewCase() {
+    closeWelcome();
+    switchTab("ingestion");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function continueSavedCase() {
+    closeWelcome();
+    openHistory();
+  }
+
+  if ($("#welcome-new")) $("#welcome-new").addEventListener("click", startNewCase);
+  if ($("#welcome-continue")) {
+    $("#welcome-continue").addEventListener("click", () => {
+      if ($("#welcome-continue").disabled) return;
+      continueSavedCase();
+    });
+  }
+  if ($("#btn-welcome-close")) $("#btn-welcome-close").addEventListener("click", closeWelcome);
+  if ($("#welcome-modal")) {
+    $("#welcome-modal").addEventListener("click", (e) => {
+      if (e.target === $("#welcome-modal")) closeWelcome(); // backdrop → default to blank step 1
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("#welcome-modal") && !$("#welcome-modal").classList.contains("hidden")) closeWelcome();
   });
 
   // ── Tab 3: Configure & Quote ────────────────────────────────────────────
@@ -1475,16 +1696,29 @@
       .map((ln, i) => {
         const numInp = (field, val, ph = "", w = 70) =>
           `<input type="number" step="any" class="field-input text-right" style="width:${w}px; min-width:${w}px; padding:6px 8px;" data-i="${i}" data-f="${field}" value="${val == null || val === "" ? "" : val}" placeholder="${ph}" />`;
+        // Searchable combo styled like the custom dropdowns: brown chevron +
+        // a round clear (×) button that appears once the field has a value.
+        const chevronSvg =
+          `<svg class="cs-combo-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+        const comboInput = (field, val, listAttr, minW, ph) => {
+          const v = val == null ? "" : String(val);
+          const clearBtn = v !== ""
+            ? `<button type="button" class="cs-combo-clear" data-clear="${i}" data-cf="${field}" tabindex="-1" aria-label="Clear">&times;</button>`
+            : "";
+          return `<div class="cs-combo" style="min-width:${minW}px;">` +
+            `<input class="field-input cs-combo-input" data-i="${i}" data-f="${field}"${listAttr} value="${escapeHtml(v)}" placeholder="${ph}" />` +
+            clearBtn + chevronSvg +
+            `</div>`;
+        };
         const famVal =
           ln.family ||
           (ln.familyId && marginCatalog.byFamily[ln.familyId]
             ? marginCatalog.byFamily[ln.familyId].name
             : "");
-        const famInput =
-          `<input class="field-input" style="width:100%; min-width:210px; padding:6px 8px;" data-i="${i}" data-f="familyName" list="margin-families" value="${escapeHtml(famVal)}" placeholder="select or type a family" />`;
+        const famInput = comboInput("familyName", famVal, ` list="margin-families"`, 210, "select or type a family");
         const listAttr = ln.familyId ? ` list="mdl-${escapeHtml(ln.familyId)}"` : "";
         const modelInp =
-          `<input class="field-input" style="width:100%; min-width:330px; padding:6px 8px;" data-i="${i}" data-f="model"${listAttr} value="${escapeHtml(ln.description == null ? "" : ln.description)}" placeholder="${ln.familyId ? "type to search a model…" : "type a model or description"}" />` +
+          comboInput("model", ln.description, listAttr, 330, ln.familyId ? "type to search a model…" : "type a model or description") +
           (ln.productCode ? `<div style="font-size:11px; color:var(--muted); margin-top:3px;">${escapeHtml(ln.productCode)}</div>` : "");
         return `<tr data-row="${i}">
           <td style="min-width:220px;">${famInput}</td>
@@ -1552,6 +1786,25 @@
     }
   });
   $("#margin-table-body").addEventListener("click", (e) => {
+    // Clear (×) button inside a family/model combo: reset that field only.
+    const clearBtn = e.target.closest("[data-clear]");
+    if (clearBtn) {
+      const idx = Number(clearBtn.dataset.clear);
+      const line = marginState.lines[idx];
+      if (!line) return;
+      marginState.selectedDiscount = null;
+      if (clearBtn.dataset.cf === "familyName") {
+        line.family = "";
+        line.familyId = "";
+        line.catalogRef = null;
+      } else if (clearBtn.dataset.cf === "model") {
+        line.description = "";
+        line.productCode = "";
+        line.catalogRef = null;
+      }
+      renderMarginTable();
+      return;
+    }
     const btn = e.target.closest("[data-remove]");
     if (!btn) return;
     marginState.lines.splice(Number(btn.dataset.remove), 1);
@@ -1715,6 +1968,7 @@
     marginState.selectedDiscount = null;
     $("#margin-project").value = rec.caseReference || rec.name || "";
     $("#margin-currency").value = rec.currency || "USD";
+    syncCustomSelect("margin-currency");
     const g = rec.globals || {};
     const setVal = (idAttr, v) => {
       const el = $("#" + idAttr);
@@ -1828,6 +2082,112 @@
     if (!marginState.lines.length) marginAutofillFromBoq();
   });
 
+  // ── Custom dropdowns (styled option lists for native <select>s) ─────────
+  // Native <select> popups can't be themed, so we hide the real element and
+  // render a styled trigger + panel over it, mirroring its options and keeping
+  // its value + `change` events intact (so existing handlers still fire).
+  const csRegistry = {};
+
+  function enhanceSelect(select) {
+    if (!select || select.dataset.enhanced === "1") return;
+    select.dataset.enhanced = "1";
+    select.style.display = "none";
+
+    const wrap = document.createElement("div");
+    wrap.className = "cs";
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "cs-trigger";
+    trigger.innerHTML =
+      `<span class="cs-trigger-label"></span>` +
+      `<svg class="cs-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+    const panel = document.createElement("div");
+    panel.className = "cs-panel";
+    panel.style.display = "none";
+
+    select.parentNode.insertBefore(wrap, select);
+    wrap.appendChild(select);
+    wrap.appendChild(trigger);
+    wrap.appendChild(panel);
+    const labelEl = trigger.querySelector(".cs-trigger-label");
+
+    const selectedOpt = () => select.options[select.selectedIndex] || null;
+    function refreshLabel() {
+      const opt = selectedOpt();
+      labelEl.textContent = opt ? opt.textContent : "";
+      labelEl.classList.toggle("placeholder", !opt || opt.value === "");
+    }
+    function addOption(o) {
+      const el = document.createElement("div");
+      el.className = "cs-option";
+      if (o.value === "") el.classList.add("placeholder");
+      if (o.selected) el.classList.add("selected");
+      el.textContent = o.textContent;
+      el.addEventListener("click", () => {
+        select.value = o.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        refreshLabel();
+        close();
+      });
+      panel.appendChild(el);
+    }
+    function buildPanel() {
+      panel.innerHTML = "";
+      Array.from(select.children).forEach((node) => {
+        if (node.tagName === "OPTGROUP") {
+          const lab = document.createElement("div");
+          lab.className = "cs-optgroup-label";
+          lab.textContent = node.label;
+          panel.appendChild(lab);
+          Array.from(node.children).forEach(addOption);
+        } else if (node.tagName === "OPTION") {
+          addOption(node);
+        }
+      });
+    }
+    function onDocClick(e) { if (!wrap.contains(e.target)) close(); }
+    function onKey(e) { if (e.key === "Escape") close(); }
+    function open() {
+      buildPanel();
+      panel.style.display = "";
+      wrap.classList.add("open");
+      document.addEventListener("click", onDocClick, true);
+      document.addEventListener("keydown", onKey);
+    }
+    function close() {
+      panel.style.display = "none";
+      wrap.classList.remove("open");
+      document.removeEventListener("click", onDocClick, true);
+      document.removeEventListener("keydown", onKey);
+    }
+    trigger.addEventListener("click", (e) => {
+      e.preventDefault();
+      wrap.classList.contains("open") ? close() : open();
+    });
+
+    // Re-sync when options are repopulated (e.g. margin-load records refresh).
+    const obs = new MutationObserver(() => {
+      refreshLabel();
+      if (wrap.classList.contains("open")) buildPanel();
+    });
+    obs.observe(select, { childList: true, subtree: true });
+
+    csRegistry[select.id] = {
+      refresh: () => {
+        refreshLabel();
+        if (wrap.classList.contains("open")) buildPanel();
+      },
+    };
+    refreshLabel();
+  }
+
+  function syncCustomSelect(id) {
+    const r = csRegistry[id];
+    if (r) r.refresh();
+  }
+
+  ["margin-currency", "margin-load"].forEach((id) => enhanceSelect($("#" + id)));
+
   // ── Initial data load ──────────────────────────────────────────────────
   loadPoc1Status();
   loadSampleBoq();
@@ -1835,6 +2195,9 @@
   updateHistoryCount();
   marginLoadCatalog();
   marginRefreshRecords();
+
+  // Greet the user on entry: start a new case or continue a saved one.
+  showWelcome();
 })();
 
 function toggleCollapsible(bodyId, chevronId, labelId) {

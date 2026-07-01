@@ -22,6 +22,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 
@@ -518,7 +519,12 @@ async def poc1_status():
 # --------------------------------------------------------------------------- #
 # Sample data (pre-populates the review screen on first load)
 # --------------------------------------------------------------------------- #
+@lru_cache(maxsize=1)
 def _load_sample() -> tuple[dict | None, str]:
+    # Cached: the sample submission is static during a server run, but parsing
+    # its source documents (parse_project_folder) costs several seconds. Without
+    # this cache every /boq/sample and /spec/sample hit re-parsed from disk,
+    # blocking the event loop and stalling other requests (e.g. feedback saves).
     sample_dir = config.OUTPUT_DIR / SAMPLE_PROJECT_ID
     step1_path = sample_dir / "step1_extract_info.json"
     step2_path = sample_dir / "step2_create_boq.json"
@@ -544,7 +550,9 @@ def _load_sample() -> tuple[dict | None, str]:
 
 
 @app.get("/api/v1/boq/sample")
-async def get_sample_boq():
+def get_sample_boq():
+    # Sync def -> runs in the threadpool, so the (cached) sample parse never
+    # blocks the async event loop / other in-flight requests.
     extraction, _ = _load_sample()
     if extraction is None:
         return {
@@ -559,7 +567,7 @@ async def get_sample_boq():
 
 
 @app.get("/api/v1/spec/sample")
-async def get_sample_spec():
+def get_sample_spec():
     extraction, preview = _load_sample()
     file_name = (
         extraction["source"]["fileName"]
@@ -675,7 +683,7 @@ async def margin_export(request: Request):
 
 
 @app.get("/api/v1/requirements/sample")
-async def get_sample_requirements():
+def get_sample_requirements():
     """Return the full structured requirements for the sample submission.
 
     Mirrors the original POC endpoint. Used by any caller that wants raw

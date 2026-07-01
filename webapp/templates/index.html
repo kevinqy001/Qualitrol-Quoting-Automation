@@ -580,6 +580,172 @@
       padding: 8px 10px;
     }
 
+    /* Custom dropdown (styled option list — native <select> lists can't be
+       themed). Enhances selected fields to match the project aesthetic. */
+    .cs { position: relative; }
+
+    .cs-trigger {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid #d6cbc5;
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .cs-trigger:hover {
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 1px 6px rgb(35 23 18 / 0.06);
+    }
+
+    .cs.open .cs-trigger {
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 0 0 4px rgb(237 84 29 / 0.11);
+    }
+
+    .cs-trigger-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cs-trigger-label.placeholder {
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .cs-chevron {
+      flex: 0 0 auto;
+      color: #8a6f63;
+      transition: transform 160ms ease, color 160ms ease;
+    }
+
+    .cs.open .cs-chevron {
+      transform: rotate(180deg);
+      color: var(--ralliant-orange);
+    }
+
+    .cs-panel {
+      position: absolute;
+      z-index: 50;
+      top: calc(100% + 6px);
+      left: 0;
+      right: 0;
+      max-height: 280px;
+      overflow-y: auto;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      animation: panelIn 150ms cubic-bezier(.2, .8, .2, 1);
+    }
+
+    .cs-optgroup-label {
+      padding: 10px 10px 4px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .cs-option {
+      padding: 9px 10px;
+      border-radius: 9px;
+      font-size: 14px;
+      color: var(--ink);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: background 120ms ease, color 120ms ease;
+    }
+
+    .cs-option:hover {
+      background: var(--ralliant-orange-soft);
+      color: var(--ralliant-brown);
+    }
+
+    .cs-option.selected {
+      background: var(--ralliant-orange-soft);
+      color: var(--ralliant-brown);
+      font-weight: 750;
+    }
+
+    .cs-option.placeholder { color: var(--muted); }
+
+    /* Searchable combo (datalist <input>) restyled to match the custom
+       dropdowns: hide the native picker arrow, draw our own centered brown
+       chevron, and add a small round clear (×) button on the right. */
+    .cs-combo {
+      position: relative;
+      display: block;
+      width: 100%;
+    }
+
+    .cs-combo-input {
+      width: 100%;
+      padding: 6px 58px 6px 10px;
+    }
+
+    .cs-combo-input::-webkit-calendar-picker-indicator {
+      display: none !important;
+    }
+
+    .cs-combo-input::-webkit-list-button {
+      display: none !important;
+    }
+
+    .cs-combo-chevron {
+      position: absolute;
+      top: 50%;
+      right: 11px;
+      transform: translateY(-50%);
+      color: #8a6f63;
+      pointer-events: none;
+      transition: color 160ms ease;
+    }
+
+    .cs-combo-input:focus ~ .cs-combo-chevron {
+      color: var(--ralliant-orange);
+    }
+
+    .cs-combo-clear {
+      position: absolute;
+      top: 50%;
+      right: 32px;
+      transform: translateY(-50%);
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: #ece3de;
+      color: #7a675e;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 140ms ease, color 140ms ease, transform 140ms ease;
+    }
+
+    .cs-combo-clear:hover {
+      background: var(--ralliant-orange-soft);
+      color: var(--ralliant-brown);
+      transform: translateY(-50%) scale(1.12);
+    }
+
     .button-row {
       display: flex;
       gap: 10px;
@@ -598,6 +764,7 @@
       padding: 10px 18px;
       font-size: 14px;
       font-weight: 820;
+      text-decoration: none;
       cursor: pointer;
       transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
     }
@@ -870,6 +1037,95 @@
       line-height: 1.5;
     }
 
+    /* ── BOQ feedback control (thumbs up / down) ───────────────────────── */
+    .fb-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-right: auto;
+      padding: 6px 14px 6px 16px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: linear-gradient(180deg, #fffdfc, #fbf8f6);
+    }
+
+    .fb-label {
+      font-size: 13px;
+      font-weight: 750;
+      color: var(--muted);
+      letter-spacing: 0.01em;
+    }
+
+    .fb-btns {
+      display: inline-flex;
+      gap: 6px;
+    }
+
+    .fb-btn {
+      width: 38px;
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: #fff;
+      border: 1px solid var(--line);
+      font-size: 17px;
+      line-height: 1;
+      cursor: pointer;
+      filter: grayscale(0.35);
+      transition: transform 140ms ease, background 140ms ease,
+        border-color 140ms ease, box-shadow 140ms ease, filter 140ms ease, opacity 140ms ease;
+    }
+
+    .fb-btn:hover:not(:disabled) {
+      transform: translateY(-1px) scale(1.06);
+      box-shadow: var(--shadow-soft);
+      filter: grayscale(0);
+    }
+
+    .fb-btn:active:not(:disabled) {
+      transform: scale(0.94);
+    }
+
+    .fb-btn.selected-up {
+      filter: grayscale(0);
+      background: var(--success-soft);
+      border-color: var(--success);
+      box-shadow: 0 0 0 3px rgb(19 121 91 / 0.14);
+    }
+
+    .fb-btn.selected-down {
+      filter: grayscale(0);
+      background: var(--ralliant-orange-soft);
+      border-color: var(--ralliant-orange);
+      box-shadow: 0 0 0 3px rgb(237 84 29 / 0.14);
+    }
+
+    /* When one side is chosen, gently mute the other. */
+    .fb-btn.dim {
+      opacity: 0.42;
+      filter: grayscale(0.7);
+    }
+
+    .fb-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12.5px;
+      font-weight: 680;
+    }
+
+    .fb-spinner {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      border: 2px solid #ecdccf;
+      border-top-color: var(--ralliant-orange);
+      animation: spin 750ms linear infinite;
+    }
+
     .app-footer {
       max-width: 1440px;
       margin: 0;
@@ -917,6 +1173,65 @@
       max-height: 56vh;
       overflow-y: auto;
       padding: 8px 0;
+    }
+
+    /* Welcome chooser sits above every other overlay. */
+    .welcome-overlay { z-index: 80; align-items: center; }
+
+    .welcome-choices {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      padding: 22px;
+    }
+
+    @media (max-width: 560px) {
+      .welcome-choices { grid-template-columns: 1fr; }
+    }
+
+    .welcome-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      text-align: left;
+      padding: 22px 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg, 14px);
+      background: var(--paper);
+      cursor: pointer;
+      transition: border-color 160ms, box-shadow 160ms, transform 160ms, background 160ms;
+    }
+
+    .welcome-card:hover:not([disabled]) {
+      border-color: var(--accent, #b45309);
+      box-shadow: var(--shadow);
+      transform: translateY(-2px);
+      background: var(--paper-2, #fffaf3);
+    }
+
+    .welcome-card:focus-visible {
+      outline: 2px solid var(--accent, #b45309);
+      outline-offset: 2px;
+    }
+
+    .welcome-card[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .welcome-card-icon { font-size: 30px; line-height: 1; }
+
+    .welcome-card-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--ink, #1f140c);
+    }
+
+    .welcome-card-desc {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
     }
 
     .history-empty {
@@ -1025,8 +1340,6 @@
           <span>History</span>
           <span id="history-count" class="badge" style="padding:1px 7px;font-size:11px;">0</span>
         </button>
-        <span class="badge success"><span class="status-dot"></span> API Online</span>
-        <span class="badge accent" id="llm-mode-badge">Checking AI Runtime</span>
       </div>
     </div>
   </header>
@@ -1079,7 +1392,7 @@
             </div>
             <!-- Zone B: circuit diagram / SLD -->
             <div style="flex:1; min-width:0;">
-              <p class="field-label" style="margin-bottom:8px;">Circuit Diagram / SLD <span style="font-weight:400;color:var(--muted);">(optional)</span></p>
+              <p class="field-label" style="margin-bottom:8px;">Circuit Diagram / SLD</p>
               <div id="drop-zone-sld" class="drop-zone drop-zone-sld" style="height:160px;">
                 <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true" style="width:28px;height:28px;">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" />
@@ -1096,10 +1409,15 @@
             <h3 class="section-heading" id="runtime-title">Loading runtime status...</h3>
             <p class="section-copy" id="runtime-copy">Checking whether the app will call an LLM endpoint or use local rules.</p>
             <div style="margin-top: 20px;">
-              <span class="field-label">Supported Inputs</span>
+              <span class="field-label" style="margin-bottom: 12px;">Supported Inputs</span>
               <div id="supported-types" class="chip-row" style="justify-content: flex-start;">
                 <span class="badge">Loading...</span>
               </div>
+            </div>
+
+            <div id="eta-panel" style="margin-top: 22px;">
+              <span class="field-label">Estimated Analysis Time</span>
+              <p id="eta-summary" class="section-copy" style="margin-top: 6px; font-size: 13px;"></p>
             </div>
           </aside>
         </div>
@@ -1168,7 +1486,7 @@
             <div style="display: flex; justify-content: space-between; gap: 16px; align-items: flex-start;">
               <div>
                 <p class="section-kicker">Document Analysis Summary</p>
-                <p id="extraction-summary" class="section-copy">Load the sample or upload a document to see extracted requirements.</p>
+                <div id="extraction-summary" class="section-copy">Load the sample or upload a document to see extracted requirements.</div>
               </div>
               <div id="feature-chips" class="chip-row"></div>
             </div>
@@ -1216,7 +1534,7 @@
               <h3 class="section-heading">Draft BOQ — Qualitrol Product Lines</h3>
               <span class="badge accent" id="boq-ref">-</span>
             </div>
-            <div style="overflow:auto; max-height: 480px;">
+            <div style="overflow-x: hidden; overflow-y: auto; max-height: 480px;">
               <table>
                 <thead>
                   <tr>
@@ -1224,7 +1542,7 @@
                     <th>Product Code</th>
                     <th>Description</th>
                     <th class="text-right">Qty</th>
-                    <th>Tech Params</th>
+                    <th>Scenario</th>
                   </tr>
                 </thead>
                 <tbody id="boq-table-body">
@@ -1233,11 +1551,13 @@
               </table>
             </div>
             <div class="button-row" style="justify-content: flex-end; padding: 16px 20px; gap:10px; flex-wrap:wrap;">
-              <div id="boq-feedback" class="hidden" style="display:flex; align-items:center; gap:8px; margin-right:auto;">
-                <span class="section-copy" style="font-size:13px; font-weight:600;">Get Feedback:</span>
-                <button class="btn-secondary" id="btn-fb-up" type="button" title="Satisfied with this AI-generated BOQ" aria-label="Thumbs up" style="padding:6px 12px; font-size:16px; line-height:1;">👍</button>
-                <button class="btn-secondary" id="btn-fb-down" type="button" title="Not satisfied — tell us why" aria-label="Thumbs down" style="padding:6px 12px; font-size:16px; line-height:1;">👎</button>
-                <span id="fb-status" class="section-copy" style="font-size:12px;"></span>
+              <div id="boq-feedback" class="fb-group hidden">
+                <span class="fb-label">Rate this draft</span>
+                <span class="fb-btns">
+                  <button class="fb-btn" id="btn-fb-up" type="button" title="Satisfied with this AI-generated BOQ" aria-label="Thumbs up">👍</button>
+                  <button class="fb-btn" id="btn-fb-down" type="button" title="Not satisfied — tell us why" aria-label="Thumbs down">👎</button>
+                </span>
+                <span id="fb-status" class="fb-status"></span>
               </div>
               <a class="btn-secondary hidden" id="btn-download-boq" download href="#" title="Download the generated BOQ Excel">
                 <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
@@ -1278,7 +1598,7 @@
           <span class="badge" id="margin-source">No BOQ loaded</span>
         </div>
 
-        <div class="card" style="margin-top: 16px;">
+        <div class="card" style="margin-top: 16px; overflow: visible;">
           <div class="card-body">
             <h3 class="section-heading">Project Inputs</h3>
             <div style="display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; margin-top:14px;">
@@ -1490,6 +1810,32 @@
   <footer class="app-footer"></footer>
 
   <!-- ── History modal: past scanned/analyzed cases (localStorage) ───────── -->
+  <!-- ── Welcome chooser: shown on entry — start fresh or resume a saved case ── -->
+  <div id="welcome-modal" class="history-overlay welcome-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div class="history-panel" style="max-width:640px;">
+      <div class="history-head">
+        <div style="flex:1;">
+          <p class="section-kicker" style="margin-bottom:4px;">Welcome</p>
+          <h2 class="section-heading" id="welcome-title">How would you like to start?</h2>
+          <p class="section-copy" style="margin:0;">Begin a brand-new quotation, or pick up where you left off on a saved case.</p>
+        </div>
+        <button id="btn-welcome-close" class="file-pill-remove" type="button" aria-label="Close" style="width:34px;height:34px;">×</button>
+      </div>
+      <div class="welcome-choices">
+        <button id="welcome-new" class="welcome-card" type="button">
+          <span class="welcome-card-icon" aria-hidden="true">📄</span>
+          <span class="welcome-card-title">Start a New Case</span>
+          <span class="welcome-card-desc">Upload documents and run a fresh analysis from step one.</span>
+        </button>
+        <button id="welcome-continue" class="welcome-card" type="button">
+          <span class="welcome-card-icon" aria-hidden="true">🗂️</span>
+          <span class="welcome-card-title">Continue a Saved Case</span>
+          <span class="welcome-card-desc" id="welcome-continue-desc">Reopen a previously analyzed case from your history.</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="history-modal" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
     <div class="history-panel">
       <div class="history-head">
@@ -1559,6 +1905,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=24"></script>
 </body>
 </html>
