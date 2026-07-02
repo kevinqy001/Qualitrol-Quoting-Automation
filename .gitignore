@@ -13,3 +13,7 @@ qualitrol_core/tavily_config.local.json
 # Customer sample submissions (confidential / large) - do not commit
 Gemba Samples/
 Preparation/
+
+# Data-package backups created by the merge tooling - do not commit
+*.backup_*.xlsx
+*.premerge_*.xlsx

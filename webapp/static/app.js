@@ -761,7 +761,7 @@
     if (!c) return;
     c.innerHTML =
       `<table>
-        <thead><tr><th>#</th><th>Product Code</th><th>Description</th><th class="text-right">Qty</th></tr></thead>
+        <thead><tr><th>#</th><th>Product Code</th><th>Description</th><th class="text-right">Qty</th><th></th></tr></thead>
         <tbody>` +
       (items || [])
         .map(
@@ -770,6 +770,7 @@
             <td><input class="field-input edit-pc" data-i="${i}" value="${escapeHtml(String(it.productCode ?? ""))}" /></td>
             <td style="color:var(--muted);font-size:13px;">${escapeHtml(String(it.description ?? ""))}</td>
             <td class="text-right"><input class="field-input edit-qty" data-i="${i}" value="${escapeHtml(String(it.quantity ?? ""))}" style="width:90px;text-align:right;" /></td>
+            <td class="text-right"><button type="button" class="file-pill-remove edit-del" data-i="${i}" title="Delete this line" aria-label="Delete line ${escapeHtml(String(it.lineNumber ?? i + 1))}" style="width:28px;height:28px;">×</button></td>
           </tr>`
         )
         .join("") +
@@ -823,6 +824,18 @@
     // Focus the product-code field of the newly added row.
     const pcs = $("#edit-boq-list").querySelectorAll(".edit-pc");
     if (pcs.length) pcs[pcs.length - 1].focus();
+  }
+
+  function deleteEditLine(i) {
+    if (!currentExtraction) return;
+    if (!Array.isArray(currentExtraction.lineItems)) return;
+    const items = currentExtraction.lineItems;
+    readEditRowsInto(items); // preserve any edits already typed into the rows
+    if (!Number.isInteger(i) || i < 0 || i >= items.length) return;
+    items.splice(i, 1);
+    // Renumber sequentially so the BOQ stays 1..N without gaps.
+    items.forEach((it, idx) => { it.lineNumber = idx + 1; });
+    buildEditRows(items);
   }
 
   function persistCurrentCaseEdits() {
@@ -899,6 +912,12 @@
   $("#btn-edit-addline").addEventListener("click", addEditLine);
   $("#btn-edit-reset").addEventListener("click", resetEditBoq);
   $("#btn-edit-save").addEventListener("click", saveEditBoq);
+  // Rows are re-rendered on every change, so delegate the per-row delete click.
+  $("#edit-boq-list").addEventListener("click", (e) => {
+    const btn = e.target.closest(".edit-del");
+    if (!btn) return;
+    deleteEditLine(Number(btn.dataset.i));
+  });
   $("#edit-boq-modal").addEventListener("click", (e) => {
     if (e.target === $("#edit-boq-modal")) closeEditBoq();
   });
