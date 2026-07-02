@@ -4,9 +4,12 @@ python-docx>=1.1
 pypdf>=4.0
 
 # Web app (frontend UI + ingestion API -> Step 1 / Step 2 pipelines).
-# Launch with: python app.py   (or  uvicorn app:app --reload)
+# Launch locally with: python app.py   (or  uvicorn app:app --reload)
+# In production (e.g. Azure App Service) gunicorn runs the ASGI app via the
+# uvicorn worker class -- see startup.sh.
 fastapi>=0.115
 uvicorn[standard]>=0.32
+gunicorn>=23.0
 jinja2>=3.1
 python-multipart>=0.0.18
 
