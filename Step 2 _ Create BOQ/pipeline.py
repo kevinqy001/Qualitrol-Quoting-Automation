@@ -26,7 +26,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from qualitrol_core import config, constants, io_utils, llm, llm_extract  # noqa: E402
+from qualitrol_core import (  # noqa: E402
+    config,
+    constants,
+    io_utils,
+    llm,
+    llm_extract,
+    matching,
+)
 from qualitrol_core.data_package import DataPackage, load_data_package  # noqa: E402
 from qualitrol_core.schemas import (  # noqa: E402
     BOQLine,
@@ -226,6 +233,94 @@ def _calc_quantity(rule, asset_counts: dict[str, float]):
 # --------------------------------------------------------------------------- #
 # Product matching + parameter check
 # --------------------------------------------------------------------------- #
+# Weight a requirement contributes to a model's parameter-fit score.
+_PARAM_WEIGHT = {"Must-have": 3.0, "Preferred": 1.0, "Quantity Basis": 1.0,
+                 "Reference": 0.5}
+# Commercial safety default: prefer a validated model over an unverified one.
+_STATUS_RANK = {"verified": 0, "candidate": 1}
+
+
+def _score_product(product, scenario_reqs: list[dict], dp: DataPackage) -> dict:
+    """Score one product model against a scenario's extracted requirements.
+
+    Compares each requirement's extracted value to the product's parameter rows
+    (08_Product_Parameter_Template) and classifies it as confirmed / violated /
+    unconfirmed, producing a parameter-fit score used to rank models within a
+    family. Requirements with no extracted value (TBD) can't be checked and are
+    counted as unconfirmed rather than penalised.
+    """
+    by_metric: dict[str, list] = {}
+    for p in dp.parameters_for_product(product.product_id):
+        by_metric.setdefault(p.metric_id, []).append(p)
+
+    confirmed: list[str] = []
+    violated: list[str] = []
+    unconfirmed: list[str] = []
+    points = 0.0
+    order = {"pass": 0, "unknown": 1, "fail": 2}
+
+    for req in scenario_reqs:
+        weight = _PARAM_WEIGHT.get(req["requirement_type"], 0.5)
+        params = by_metric.get(req["metric_id"])
+        value = req.get("parameter_value") or ""
+        if not params:
+            # Product doesn't spec this metric; only note it if the customer
+            # actually stated a must-have value we'd have wanted to confirm.
+            if value and req["requirement_type"] == "Must-have":
+                unconfirmed.append(req["metric_name"])
+            continue
+        verdict = sorted(
+            (matching.match_parameter_value(value, p.min_value, p.max_value,
+                                            p.supported_value) for p in params),
+            key=lambda v: order[v],
+        )[0]
+        if verdict == "pass":
+            confirmed.append(req["metric_name"])
+            points += weight
+        elif verdict == "fail":
+            violated.append(req["metric_name"])
+            points -= weight * 1.5
+        elif value:
+            unconfirmed.append(req["metric_name"])
+
+    must_violated = any(
+        r["requirement_type"] == "Must-have" and r["metric_name"] in violated
+        for r in scenario_reqs
+    )
+    if (product.status or "").lower() == "verified":
+        points += 0.5
+    return {
+        "product": product,
+        "confirmed": confirmed,
+        "violated": violated,
+        "unconfirmed": unconfirmed,
+        "points": round(points, 2),
+        "must_violated": must_violated,
+        "n_params": len(by_metric),
+    }
+
+
+def _select_best_product(products: list, scenario_reqs: list[dict],
+                         dp: DataPackage) -> dict | None:
+    """Rank all models in a family and return the best-scoring one.
+
+    Ranking policy (tunable): (1) never rank a model that violates a must-have
+    parameter on top; (2) prefer Verified over Candidate; (3) then by
+    parameter-fit points. Ties preserve the catalog order (stable sort), so a
+    model is only promoted above the family's first-listed one when there is a
+    real discriminating signal — otherwise today's default choice is kept.
+    """
+    if not products:
+        return None
+    scored = [_score_product(p, scenario_reqs, dp) for p in products]
+    scored.sort(key=lambda s: (
+        s["must_violated"],
+        _STATUS_RANK.get((s["product"].status or "").lower(), 2),
+        -s["points"],
+    ))
+    return scored[0]
+
+
 def match_products(detected: list[dict], requirements: list[dict], dp: DataPackage,
                    project_id: str) -> list[ProductMatch]:
     """One candidate per product family, attributed to its strongest scenario."""
@@ -244,32 +339,49 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
 
     for family_id, dets in fam_to_scenarios.items():
         family = dp.families[family_id]
-        best = dets[0]
-        sid = best["scenario_id"]
-        scenario_conf = best["confidence"]
+        best_det = dets[0]
+        sid = best_det["scenario_id"]
+        scenario_conf = best_det["confidence"]
         scenario_reqs = reqs_by_scenario.get(sid, [])
         must_haves = [r for r in scenario_reqs if r["requirement_type"] == "Must-have"]
-        must_met = [r for r in must_haves if r["parameter_value"]]
 
+        # Score every model in the family and pick the best fit (replaces the
+        # previous "take products[0]" behaviour).
         products = dp.products_for_family(family_id)
-        product = products[0] if products else None
+        best = _select_best_product(products, scenario_reqs, dp)
+        product = best["product"] if best else None
         pid = product.product_id if product else f"{family_id}_TBD"
         model = product.model if product else ""
         status = product.status if product else "TBD"
 
-        covered = []
-        if product:
-            covered_ids = {p.metric_id for p in dp.parameters_for_product(product.product_id)}
-            covered = [r["metric_name"] for r in must_haves if r["metric_id"] in covered_ids]
+        confirmed = best["confirmed"] if best else []
+        violated = best["violated"] if best else []
+        must_violated = best["must_violated"] if best else False
+        # Only list parameters whose extracted value was actually confirmed
+        # against the chosen model (not merely "the product specs this metric").
+        matched_display = confirmed
 
         tentative = scenario_conf < review_thr
         # A product is considered "capability known" if it has a real model name.
         # Status "TBD" is treated the same as "Candidate"/"Verified" for matching
         # purposes — TBD only blocks when there is *also* no model name.
         capability_known = bool(model)
+        # "Matched" only when every must-have has been positively confirmed
+        # against the chosen model (TBD must-haves keep it at "Partial").
+        all_must_confirmed = (
+            bool(must_haves)
+            and all(r["metric_name"] in confirmed for r in must_haves)
+        )
 
-        if capability_known:
-            param_result = "Matched" if len(must_met) == len(must_haves) else "Partial"
+        if capability_known and must_violated:
+            # The best available model still violates a hard requirement.
+            param_result = "Mismatch"
+            score = round(min(0.5, scenario_conf), 2)
+            status_label = "Needs Review"
+            gap = "Parameter conflict: " + ", ".join(violated) + "."
+            recommendation = "Parameter conflict; review product selection or catalog."
+        elif capability_known:
+            param_result = "Matched" if all_must_confirmed else "Partial"
             score = round(min(0.95, scenario_conf), 2)
             status_label = (
                 "Recommended"
@@ -277,7 +389,13 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
                 and param_result == "Matched" and not tentative
                 else "Needs Review"
             )
-            gap = "" if param_result == "Matched" else "Some must-have parameters unconfirmed."
+            if param_result == "Matched":
+                gap = ""
+            else:
+                unmet = [r["metric_name"] for r in must_haves
+                         if r["metric_name"] not in confirmed]
+                gap = "Must-have parameters unconfirmed" + (
+                    ": " + ", ".join(unmet) if unmet else "") + "."
             recommendation = status_label
         else:
             param_result = "Missing Data (product capability TBD)"
@@ -304,7 +422,7 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
                 parameter_match_result=param_result,
                 match_score=score,
                 match_status=status_label,
-                matched_parameters="; ".join(covered),
+                matched_parameters="; ".join(matched_display),
                 gap_or_risk=gap,
                 recommendation=recommendation,
             )

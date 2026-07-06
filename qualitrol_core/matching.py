@@ -162,3 +162,90 @@ def count_occurrences(text_lower: str, term: str) -> int:
     if _is_short_alnum(term):
         return len(re.findall(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text_lower))
     return text_lower.count(term)
+
+
+# --------------------------------------------------------------------------- #
+# Parameter-level value comparison (Step 2 product-parameter matching)
+# --------------------------------------------------------------------------- #
+_SPEC_NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+_UPPER_BOUND_HINTS = ("up to", "upto", "max", "maximum", "≤", "<=", "<")
+_LOWER_BOUND_HINTS = ("at least", "min", "minimum", "≥", ">=", ">")
+
+
+def parse_spec_numbers(text: str) -> list[float]:
+    """Extract all numbers from a free-text spec value (comma-grouping aware)."""
+    out: list[float] = []
+    for tok in _SPEC_NUM_RE.findall(text or ""):
+        try:
+            out.append(float(tok.replace(",", "")))
+        except ValueError:
+            pass
+    return out
+
+
+def spec_bounds(
+    min_value: float | None, max_value: float | None, supported_value: str
+) -> tuple[float | None, float | None]:
+    """Best-effort numeric ``(lo, hi)`` for a product parameter.
+
+    Uses explicit ``min_value`` / ``max_value`` when present, otherwise parses
+    the free-text ``supported_value`` (e.g. "1 to 6 channels" -> (1, 6),
+    "up to 35 kV" -> (None, 35), "300 to 2000 MHz" -> (300, 2000)).
+    """
+    lo, hi = min_value, max_value
+    if lo is None and hi is None and supported_value:
+        sv = supported_value.lower()
+        nums = parse_spec_numbers(sv)
+        if not nums:
+            return None, None
+        if any(k in sv for k in _UPPER_BOUND_HINTS):
+            hi = max(nums)
+        elif any(k in sv for k in _LOWER_BOUND_HINTS):
+            lo = min(nums)
+        elif len(nums) >= 2:
+            lo, hi = min(nums), max(nums)
+        else:
+            hi = nums[0]  # a lone number reads as a capacity/ceiling
+    return lo, hi
+
+
+def match_parameter_value(
+    req_value: str,
+    min_value: float | None,
+    max_value: float | None,
+    supported_value: str,
+) -> str:
+    """Compare a required value to a product parameter's capability.
+
+    Returns ``"pass"`` / ``"fail"`` / ``"unknown"``.
+
+    Numeric requirements are checked against the parameter's ``[lo, hi]`` bounds
+    (a demand within a capacity/range passes; out-of-range is a real ``"fail"``).
+    Text requirements can only confirm a ``"pass"`` via token containment — a
+    non-match returns ``"unknown"``, never ``"fail"``, because free-text specs
+    use synonyms (e.g. required "SCADA" vs supported "DNP3, Modbus") and a
+    literal mismatch is not a genuine conflict. ``"unknown"`` means the value is
+    missing or not confidently comparable.
+    """
+    val = (req_value or "").strip()
+    if not val:
+        return "unknown"
+    nums = parse_spec_numbers(val)
+    is_numeric = bool(nums) and not re.search(r"[a-zA-Z]{3,}", val)
+    if is_numeric:
+        lo, hi = spec_bounds(min_value, max_value, supported_value)
+        v = nums[0]
+        if lo is not None and hi is not None:
+            return "pass" if lo <= v <= hi else "fail"
+        if hi is not None:
+            return "pass" if v <= hi else "fail"
+        if lo is not None:
+            return "pass" if v >= lo else "fail"
+        return "unknown"
+    supported = (supported_value or "").lower()
+    if not supported:
+        return "unknown"
+    needle = val.lower()
+    if needle in supported or any(tok in supported for tok in needle.split() if len(tok) > 1):
+        return "pass"
+    return "unknown"
