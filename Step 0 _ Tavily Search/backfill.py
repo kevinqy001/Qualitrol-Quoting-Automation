@@ -52,9 +52,32 @@ def _header_map(ws, header_row: int) -> dict[str, int]:
     return out
 
 
+def _note_rows_below(ws, header_row: int) -> int:
+    """Return 1 if the row directly below the header is an inserted column-guide
+    note row (blank key/ID column but other cells filled), else 0."""
+    r = header_row + 1
+    if r > ws.max_row:
+        return 0
+    key = ws.cell(row=r, column=1).value
+    if key is not None and str(key).strip() != "":
+        return 0
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=r, column=c).value
+        if v is not None and str(v).strip() != "":
+            return 1
+    return 0
+
+
+def _first_data_row(ws, header_row: int) -> int:
+    """First real data row, skipping any inserted column-guide note row."""
+    return header_row + 1 + _note_rows_below(ws, header_row)
+
+
 def _clear_data_rows(ws, header_row: int) -> None:
-    if ws.max_row > header_row:
-        ws.delete_rows(header_row + 1, ws.max_row - header_row)
+    """Delete data rows below the header, preserving any column-guide note row."""
+    first_data = _first_data_row(ws, header_row)
+    if ws.max_row >= first_data:
+        ws.delete_rows(first_data, ws.max_row - first_data + 1)
 
 
 def _write_row(ws, row_idx: int, hmap: dict[str, int], values: dict) -> None:
@@ -125,7 +148,7 @@ def backfill(catalog_path: Path = CATALOG_JSON, master_path: Path | None = None,
     # 2. Sheet 07 - products.
     prod_hmap = _header_map(ws_prod, prod_hrow)
     _clear_data_rows(ws_prod, prod_hrow)
-    r = prod_hrow + 1
+    r = _first_data_row(ws_prod, prod_hrow)
     for p in products:
         _write_row(ws_prod, r, prod_hmap, {
             "Product ID": p["product_id"],
@@ -148,7 +171,7 @@ def backfill(catalog_path: Path = CATALOG_JSON, master_path: Path | None = None,
     # 3. Sheet 08 - parameters.
     param_hmap = _header_map(ws_param, param_hrow)
     _clear_data_rows(ws_param, param_hrow)
-    r = param_hrow + 1
+    r = _first_data_row(ws_param, param_hrow)
     for prm in parameters:
         mid = prm.get("metric_id", "")
         mt, mp = match_defaults.get(mid, ("", ""))

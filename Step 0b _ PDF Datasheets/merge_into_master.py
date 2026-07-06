@@ -118,6 +118,27 @@ def _header_row_idx(ws, first_col: str) -> int:
     raise ValueError(f"header {first_col!r} not found in {ws.title}")
 
 
+def _note_rows_below(ws, header_row: int) -> int:
+    """Return 1 if the row directly below the header is an inserted column-guide
+    note row (blank key/ID column but other cells filled), else 0.
+
+    This mirrors the loader's own contract: a real data row always has its key
+    (first) column populated, so a row with an empty first column but text in
+    other columns is definitionally the human-facing note row, never data.
+    """
+    r = header_row + 1
+    if r > ws.max_row:
+        return 0
+    key = ws.cell(row=r, column=1).value
+    if key is not None and str(key).strip() != "":
+        return 0
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=r, column=c).value
+        if v is not None and str(v).strip() != "":
+            return 1
+    return 0
+
+
 def _headers(ws, hrow: int) -> list[str]:
     out = []
     c = 1
@@ -132,7 +153,8 @@ def _headers(ws, hrow: int) -> list[str]:
 
 def _read_records(ws, hrow: int, headers: list[str]) -> list[dict]:
     recs = []
-    for r in range(hrow + 1, ws.max_row + 1):
+    start = hrow + 1 + _note_rows_below(ws, hrow)
+    for r in range(start, ws.max_row + 1):
         row = [ws.cell(row=r, column=c).value for c in range(1, len(headers) + 1)]
         if all(v is None or str(v).strip() == "" for v in row):
             continue
@@ -141,10 +163,14 @@ def _read_records(ws, hrow: int, headers: list[str]) -> list[dict]:
 
 
 def _rewrite_body(ws, hrow: int, headers: list[str], records: list[dict]) -> None:
-    """Delete all data rows below the header and re-append `records`."""
+    """Delete data rows below the header and re-append `records`.
+
+    Any inserted column-guide note row (directly below the header) is preserved.
+    """
+    first_data = hrow + 1 + _note_rows_below(ws, hrow)
     last = ws.max_row
-    if last > hrow:
-        ws.delete_rows(hrow + 1, last - hrow)
+    if last >= first_data:
+        ws.delete_rows(first_data, last - first_data + 1)
     for rec in records:
         ws.append([rec.get(h) for h in headers])
 

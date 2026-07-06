@@ -52,6 +52,22 @@ def _find_header_row(ws, first_col_value: str) -> int:
     )
 
 
+def _note_rows_below(ws, header_row: int) -> int:
+    """Return 1 if the row directly below the header is an inserted column-guide
+    note row (blank key/ID column but other cells filled), else 0."""
+    r = header_row + 1
+    if r > ws.max_row:
+        return 0
+    key = ws.cell(row=r, column=1).value
+    if key is not None and str(key).strip() != "":
+        return 0
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=r, column=c).value
+        if v is not None and str(v).strip() != "":
+            return 1
+    return 0
+
+
 def _catalog_data(cat_wb, sheet_name: str) -> tuple[list[str], list[list]]:
     """Read the catalog sheet; return (header_cols, data_rows).
 
@@ -206,11 +222,13 @@ def sync(dry_run: bool = False, force: bool = False) -> None:
             print(f"  [SKIP] {sheet_name}: {exc}")
             continue
 
-        # Delete every row after the header.
+        # Delete every data row after the header, preserving any inserted
+        # column-guide note row directly below the header.
+        first_data = header_row_idx + 1 + _note_rows_below(master_ws, header_row_idx)
         last_row = master_ws.max_row
-        rows_to_delete = last_row - header_row_idx
+        rows_to_delete = last_row - first_data + 1
         if rows_to_delete > 0:
-            master_ws.delete_rows(header_row_idx + 1, rows_to_delete)
+            master_ws.delete_rows(first_data, rows_to_delete)
 
         # Append catalog data rows.
         for row_data in new_rows:
