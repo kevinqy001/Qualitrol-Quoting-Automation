@@ -14,6 +14,9 @@ qualitrol_core/tavily_config.local.json
 Gemba Samples/
 Preparation/
 
-# Data-package backups created by the merge tooling - do not commit
+# Data-package backups - kept in one folder at the repo root, never committed
+backups/
 *.backup_*.xlsx
+*.backup-*.xlsx
 *.premerge_*.xlsx
+*_BACKUP_*.xlsx
