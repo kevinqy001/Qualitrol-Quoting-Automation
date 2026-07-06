@@ -40,6 +40,16 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "measurement_point_count": ["Feeder", "Bus", "PCC", "Measurement Point"],
     "feeder_count": ["Feeder"],
     "channel_count": ["Channel"],
+    # Extended assets (keep in sync with _VALID_ASSET_TYPES in llm_extract.py).
+    "reactor_count": ["Reactor"],
+    "transmission_line_count": ["Transmission Line"],
+    "line_count": ["Transmission Line", "Feeder"],
+    "cable_count": ["Cable"],
+    "surge_arrester_count": ["Surge Arrester"],
+    "instrument_transformer_count": ["Instrument Transformer"],
+    "tap_changer_count": ["Tap Changer"],
+    "capacitor_bank_count": ["Capacitor Bank"],
+    "cabinet_count": ["Cabinet"],
 }
 
 # --------------------------------------------------------------------------- #

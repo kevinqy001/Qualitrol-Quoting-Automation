@@ -349,6 +349,11 @@ _VALID_ASSET_TYPES = {
     "Circuit Breaker", "Transformer", "GIS Bay", "Bus", "Feeder", "PCC",
     "Generator", "Motor", "Switchgear Panel", "PD Sensor", "Sensor",
     "Bushing", "Channel", "Measurement Point",
+    # Extended coverage for wider Qualitrol monitoring scenarios. Keep these
+    # strings in sync with COUNT_FIELD_TO_ASSET_TYPE in constants.py so that
+    # quantity rules can size BOQ lines from them.
+    "Reactor", "Transmission Line", "Cable", "Surge Arrester",
+    "Instrument Transformer", "Tap Changer", "Capacitor Bank", "Cabinet",
 }
 _VALID_STATUS = {"New", "Existing", "Future", "Provision", "Unclear"}
 
@@ -377,7 +382,8 @@ def extract_sld_text_vlm(
         "monitoring/panel/function labels (DFR, DDR, PMU, PQM, FMS, WAMS, Fault "
         "Recorder, Fault Locator, Power Quality, Disturbance Recorder, SCADA, IEC 61850), "
         "asset types being monitored (transformer, GIS, circuit breaker, busbar, feeder, "
-        "reactor), voltage levels, feeder/bay names, and scope notes (FUTURE / PROVISION "
+        "reactor, cable, tap changer / OLTC, surge arrester, capacitor bank, instrument "
+        "transformer / CT / VT), voltage levels, feeder/bay names, and scope notes (FUTURE / PROVISION "
         "/ EXISTING). IGNORE cable sizes, ratings, title-block / client / consultant / "
         "drawing-number text. Do NOT invent text. Respond with STRICT JSON only."
     )
@@ -429,7 +435,9 @@ def extract_sld_assets_vlm(
         "so that quantity rules can calculate BOQ quantities from the asset list.\n\n"
         "ASSET TYPES to identify (use these exact strings):\n"
         "  Circuit Breaker, Transformer, GIS Bay, Bus, Feeder, PCC, Generator, Motor,\n"
-        "  Switchgear Panel, PD Sensor, Sensor, Bushing, Channel, Measurement Point\n\n"
+        "  Switchgear Panel, PD Sensor, Sensor, Bushing, Channel, Measurement Point,\n"
+        "  Reactor, Transmission Line, Cable, Surge Arrester, Instrument Transformer,\n"
+        "  Tap Changer, Capacitor Bank, Cabinet\n\n"
         "STATUS values (use these exact strings):\n"
         "  New        – in current project scope\n"
         "  Existing   – already installed, in scope for retrofit/monitoring\n"
