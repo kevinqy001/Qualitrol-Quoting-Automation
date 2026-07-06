@@ -372,6 +372,80 @@ async def _run_pipelines(
 
 
 # --------------------------------------------------------------------------- #
+# Background ingestion jobs (avoid the cloud gateway request timeout)
+# --------------------------------------------------------------------------- #
+# Analysis (LLM + SLD vision) can run for minutes, longer than Azure App
+# Service's inbound request timeout (~230s), which would drop the connection
+# ("Failed to fetch" in the browser). We therefore run it as a background task
+# and let the client poll for the result. Job status is persisted on disk so a
+# poll served by any gunicorn worker can read it.
+_INGEST_JOBS: set = set()  # keep background task refs alive (avoid GC)
+
+
+def _job_paths(output_dir: Path) -> tuple[Path, Path]:
+    return output_dir / "_job.json", output_dir / "_result.json"
+
+
+def _build_ingest_response(step1, step2, upload_dir, saved, skipped, files_count,
+                           total_bytes, first_ext, project_id, output_dir, started):
+    preview_text = _preview_for_folder(upload_dir)
+    file_label = (
+        saved[0] if len(saved) == 1 else f"{len(saved)} files"
+    ) if saved else f"{files_count} files"
+    source_meta = {
+        "fileName": file_label,
+        "fileType": first_ext or "file",
+        "contentType": "multipart/form-data",
+    }
+    extraction, confidence = build_extraction(step1, step2, preview_text, source_meta)
+    if skipped:
+        extraction["source"]["warnings"].insert(
+            0,
+            "[Info] Unsupported file(s) ignored by the parser: "
+            + ", ".join(skipped)
+            + f". Supported types: {', '.join(sorted(config.SUPPORTED_DOC_EXTENSIONS))}.",
+        )
+    return {
+        "caseId": project_id,
+        "fileName": file_label,
+        "contentType": "multipart/form-data",
+        "fileSizeBytes": total_bytes,
+        "status": "extracted",
+        "confidence": confidence,
+        "processingTimeMs": int((time.perf_counter() - started) * 1000),
+        "fileCount": files_count,
+        "files": [{"fileName": n, "status": "parsed"} for n in saved]
+        + [{"fileName": n, "status": "skipped"} for n in skipped],
+        "extraction": extraction,
+        "boq": extraction,
+        "ingestedAt": _now(),
+        "outputDir": str(output_dir),
+    }
+
+
+async def _process_job(upload_dir, project_id, output_dir, sld_set, saved, skipped,
+                       files_count, total_bytes, first_ext, started):
+    job_path, result_path = _job_paths(output_dir)
+    try:
+        step1, step2 = await _run_pipelines(
+            upload_dir, project_id, output_dir, sld_filenames=sld_set or None
+        )
+        payload = _build_ingest_response(
+            step1, step2, upload_dir, saved, skipped, files_count,
+            total_bytes, first_ext, project_id, output_dir, started,
+        )
+        result_path.write_text(_json.dumps(payload), encoding="utf-8")
+        job_path.write_text(_json.dumps({"status": "done"}), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001  (surface a clean error to the UI)
+        logging.error("Pipeline failed for project %s:\n%s", project_id,
+                      traceback.format_exc())
+        job_path.write_text(
+            _json.dumps({"status": "error", "message": f"Pipeline failed: {exc}"}),
+            encoding="utf-8",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Web UI
 # --------------------------------------------------------------------------- #
 @app.get("/", include_in_schema=False)
@@ -446,51 +520,47 @@ async def ingest_documents(
         else:
             skipped.append(safe_name)
 
+    # Kick off the analysis in the background and return a job id immediately so
+    # the request stays well under the cloud gateway timeout. The client polls
+    # GET /api/v1/ingest/result/{jobId} for the outcome.
+    job_path, _ = _job_paths(output_dir)
+    job_path.write_text(
+        _json.dumps({"status": "processing", "startedAt": _now(),
+                     "fileCount": len(files)}),
+        encoding="utf-8",
+    )
+    task = asyncio.create_task(_process_job(
+        upload_dir, project_id, output_dir, sld_set, saved, skipped,
+        len(files), total_bytes, first_ext, started,
+    ))
+    _INGEST_JOBS.add(task)
+    task.add_done_callback(_INGEST_JOBS.discard)
+
+    return {"jobId": project_id, "caseId": project_id, "status": "processing"}
+
+
+@app.get("/api/v1/ingest/result/{job_id}")
+async def ingest_result(job_id: str):
+    """Poll a background ingestion job.
+
+    Returns the full extraction payload when done, ``{"status": "processing"}``
+    while it is still running, 404 for an unknown id, or 500 on failure.
+    """
+    safe = Path(job_id).name
+    output_dir = config.OUTPUT_DIR / safe
+    job_path, result_path = _job_paths(output_dir)
+    if not job_path.exists():
+        raise HTTPException(404, "Unknown job id.")
     try:
-        step1, step2 = await _run_pipelines(
-            upload_dir, project_id, output_dir, sld_filenames=sld_set or None
-        )
-    except Exception as exc:  # surface a clean error to the UI
-        logging.error("Pipeline failed for project %s:\n%s", project_id, traceback.format_exc())
-        raise HTTPException(500, f"Pipeline failed: {exc}") from exc
-
-    preview_text = _preview_for_folder(upload_dir)
-    file_label = (
-        saved[0] if len(saved) == 1 else f"{len(saved)} files"
-    ) if saved else f"{len(files)} files"
-    source_meta = {
-        "fileName": file_label,
-        "fileType": first_ext or "file",
-        "contentType": "multipart/form-data",
-    }
-    extraction, confidence = build_extraction(step1, step2, preview_text, source_meta)
-
-    if skipped:
-        extraction["source"]["warnings"].insert(
-            0,
-            "[Info] Unsupported file(s) ignored by the parser: "
-            + ", ".join(skipped)
-            + f". Supported types: {', '.join(sorted(config.SUPPORTED_DOC_EXTENSIONS))}.",
-        )
-
-    return {
-        "caseId": project_id,
-        "fileName": file_label,
-        "contentType": "multipart/form-data",
-        "fileSizeBytes": total_bytes,
-        "status": "extracted",
-        "confidence": confidence,
-        "processingTimeMs": int((time.perf_counter() - started) * 1000),
-        "fileCount": len(files),
-        "files": [
-            {"fileName": name, "status": "parsed"} for name in saved
-        ]
-        + [{"fileName": name, "status": "skipped"} for name in skipped],
-        "extraction": extraction,
-        "boq": extraction,
-        "ingestedAt": _now(),
-        "outputDir": str(output_dir),
-    }
+        job = _json.loads(job_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"status": "processing"}
+    status = job.get("status")
+    if status == "done" and result_path.exists():
+        return _json.loads(result_path.read_text(encoding="utf-8"))
+    if status == "error":
+        raise HTTPException(500, job.get("message", "Pipeline failed."))
+    return {"status": "processing"}
 
 
 # --------------------------------------------------------------------------- #

@@ -288,7 +288,31 @@
         signal: activeAnalysisController.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      let data = await res.json();
+
+      // Analysis runs as a background job (to avoid the cloud gateway request
+      // timeout on long LLM/SLD analyses). Poll for the result until it's ready.
+      if (data && data.status === "processing" && (data.jobId || data.caseId)) {
+        const jobId = data.jobId || data.caseId;
+        while (true) {
+          await new Promise((r) => setTimeout(r, 3000));
+          if (activeAnalysisController && activeAnalysisController.signal.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          const pollRes = await fetch(`${API}/ingest/result/${encodeURIComponent(jobId)}`, {
+            signal: activeAnalysisController.signal,
+          });
+          if (!pollRes.ok) {
+            let msg = `HTTP ${pollRes.status}`;
+            try { const e = await pollRes.json(); if (e && e.detail) msg = e.detail; } catch (_) {}
+            throw new Error(msg);
+          }
+          const pollData = await pollRes.json();
+          if (pollData && pollData.status === "processing") continue;
+          data = pollData;
+          break;
+        }
+      }
 
       const total = totalSelectedCount();
       $("#upload-filename").textContent = data.fileName;
