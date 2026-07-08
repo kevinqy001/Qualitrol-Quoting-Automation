@@ -342,6 +342,84 @@ def suggest_missing_info(client, project_summary: dict,
 
 
 # --------------------------------------------------------------------------- #
+# Step 2 - regenerate BOQ lines from reviewer feedback
+# --------------------------------------------------------------------------- #
+_VALID_FEEDBACK_ACTIONS = {"keep", "remove", "replace", "adjust"}
+
+
+def regenerate_boq_lines(
+    client, project_summary: dict, flagged_lines: list[dict]
+) -> Optional[list[dict]]:
+    """Re-decide BOQ lines that received negative reviewer feedback.
+
+    ``flagged_lines`` items:
+      {feedbackKey, product_model, product_description, scenario_id,
+       scenario_name, quantity, unit, quantity_basis, feedback_comment,
+       candidates: [{product_id, model, description}]}
+
+    Returns a list of decisions:
+      {feedbackKey, action(keep|remove|replace|adjust), product_id,
+       product_model, quantity, unit, rationale}
+    or None when the LLM is unavailable / the response is unusable.
+
+    The model may only pick a ``product_id`` from that line's ``candidates`` —
+    it must not invent product models outside the catalog.
+    """
+    if not client.available or not flagged_lines:
+        return None
+
+    system = (
+        "You are a senior Qualitrol application engineer REVISING a draft BOQ "
+        "using a reviewer's written feedback for specific lines. For EACH flagged "
+        "line choose exactly one action:\n"
+        "  - 'remove': the item is out of scope / not supplied by Qualitrol / not "
+        "needed (e.g. supplied with the GIS or transformer package).\n"
+        "  - 'replace': the wrong product family/model was chosen; pick a better "
+        "one ONLY from that line's 'candidates' list (use its product_id).\n"
+        "  - 'adjust': the product is right but the quantity is wrong; set the "
+        "corrected integer quantity.\n"
+        "  - 'keep': feedback does not warrant a change.\n"
+        "Rules: NEVER invent a product_id/model that is not in the line's "
+        "candidates. Base your decision strictly on the reviewer feedback text. "
+        "Give a short rationale citing the feedback. Respond with STRICT JSON only."
+    )
+    user = (
+        "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
+        + "\n\nFlagged BOQ lines (with reviewer feedback and allowed candidates):\n"
+        + json.dumps(flagged_lines, ensure_ascii=False)
+        + '\n\nReturn JSON: {"lines":[{"feedbackKey":"...",'
+        '"action":"keep|remove|replace|adjust","product_id":"...",'
+        '"product_model":"...","quantity":<integer or null>,"unit":"...",'
+        '"rationale":"..."}]}'
+    )
+    data = client.complete_json(system, user)
+    if not isinstance(data, dict) or "lines" not in data:
+        return None
+
+    out: list[dict] = []
+    for item in data.get("lines", []):
+        key = str(item.get("feedbackKey", "")).strip()
+        action = str(item.get("action", "")).strip().lower()
+        if not key or action not in _VALID_FEEDBACK_ACTIONS:
+            continue
+        qty = item.get("quantity")
+        try:
+            qty = float(qty) if qty is not None and str(qty) != "" else None
+        except (TypeError, ValueError):
+            qty = None
+        out.append({
+            "feedbackKey": key,
+            "action": action,
+            "product_id": str(item.get("product_id", "")).strip(),
+            "product_model": str(item.get("product_model", "")).strip(),
+            "quantity": qty,
+            "unit": str(item.get("unit", "")).strip(),
+            "rationale": str(item.get("rationale", "")).strip(),
+        })
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
 # Step 1 - SLD asset extraction via Claude Vision (optional VLM path)
 # --------------------------------------------------------------------------- #
 

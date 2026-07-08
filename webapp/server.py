@@ -214,6 +214,28 @@ def _preview_for_folder(folder: Path, limit: int = 6000) -> str:
     return ("\n\n".join(parts))[:limit]
 
 
+REQUIREMENTS_FEEDBACK_FILE = "requirements_feedback.json"
+
+
+def _requirements_feedback_path(project_id: str) -> Path:
+    return config.OUTPUT_DIR / project_id / REQUIREMENTS_FEEDBACK_FILE
+
+
+def _load_requirements_feedback(project_id: str) -> dict:
+    """Return stored per-item BOQ-line feedback as {key: {feedback, comments}}."""
+    if not project_id:
+        return {}
+    path = _requirements_feedback_path(project_id)
+    if not path.exists():
+        return {}
+    try:
+        rec = io_utils.read_json(path)
+    except Exception:
+        return {}
+    items = rec.get("items") if isinstance(rec, dict) else None
+    return items if isinstance(items, dict) else {}
+
+
 def build_extraction(
     step1: dict,
     step2: dict,
@@ -229,6 +251,9 @@ def build_extraction(
     evidence_by_id = {
         e.get("evidence_id"): e for e in step1.get("extracted_evidence", [])
     }
+    # Per-item feedback (👍/👎 + comments) is stored per case and restored onto
+    # each BOQ line so ratings survive reload/History revisits.
+    line_feedback = _load_requirements_feedback(project_id)
 
     # --- Requirement evidence list (Step 1 structured requirements) --------- #
     requirements: list[dict] = []
@@ -282,6 +307,9 @@ def build_extraction(
         # Use the human-readable model name as productCode when available;
         # fall back to product_id (e.g. PROD_PF_DGA_01) only if no model.
         display_code = product_model or product_id or "TBD"
+        # Stable per-line key used to persist/restore this line's feedback.
+        fb_key = f"L{boq.get('boq_line')}"
+        stored_fb = line_feedback.get(fb_key, {})
         line_items.append(
             {
                 "lineNumber": boq.get("boq_line"),
@@ -293,6 +321,15 @@ def build_extraction(
                 "unit": boq.get("unit") or "",
                 "technicalParams": tech_params,
                 "review_status": boq.get("review_status") or "",
+                "quantityBasis": boq.get("quantity_basis") or "",
+                "assumption": boq.get("assumption") or "",
+                "confidence": boq.get("confidence", 0.0),
+                "notes": boq.get("notes") or "",
+                # Per-item feedback (mirrors the Draft BOQ "Rate this draft"):
+                # 👍/👎 label + optional user comment, restored from storage.
+                "feedbackKey": fb_key,
+                "feedback": stored_fb.get("feedback", ""),
+                "comments": stored_fb.get("comments", ""),
             }
         )
 
@@ -361,10 +398,12 @@ async def _run_pipelines(
     project_id: str,
     output_dir: Path,
     sld_filenames: set[str] | None = None,
+    context_notes: str = "",
 ):
     """Run Step 1 then Step 2 off the event loop (they may call the LLM)."""
     step1 = await asyncio.to_thread(
-        step1_pipeline.run, upload_dir, project_id, output_dir, sld_filenames
+        step1_pipeline.run, upload_dir, project_id, output_dir, sld_filenames,
+        context_notes,
     )
     step1_path = output_dir / "step1_extract_info.json"
     step2 = await asyncio.to_thread(step2_pipeline.run, step1_path, output_dir)
@@ -424,11 +463,13 @@ def _build_ingest_response(step1, step2, upload_dir, saved, skipped, files_count
 
 
 async def _process_job(upload_dir, project_id, output_dir, sld_set, saved, skipped,
-                       files_count, total_bytes, first_ext, started):
+                       files_count, total_bytes, first_ext, started,
+                       context_notes=""):
     job_path, result_path = _job_paths(output_dir)
     try:
         step1, step2 = await _run_pipelines(
-            upload_dir, project_id, output_dir, sld_filenames=sld_set or None
+            upload_dir, project_id, output_dir, sld_filenames=sld_set or None,
+            context_notes=context_notes,
         )
         payload = _build_ingest_response(
             step1, step2, upload_dir, saved, skipped, files_count,
@@ -476,6 +517,7 @@ async def ingest_document(file: UploadFile = File(...)):
 async def ingest_documents(
     files: list[UploadFile] = File(...),
     sld_filenames: str = Form(""),
+    context_notes: str = Form(""),
 ):
     """Ingest uploaded files and run the full Step 1 + Step 2 pipeline on them.
 
@@ -484,6 +526,9 @@ async def ingest_documents(
         sld_filenames: JSON-encoded list of filenames that came from the SLD
             upload zone.  Those files will have their ``doc_type`` forced to
             ``"Drawing / SLD"`` regardless of filename heuristics.
+        context_notes: Free-text project context typed by the user in the Step 1
+            UI. Passed to the Step 1 LLM extraction as extra context when
+            generating requirements and evidence.
     """
     if not files:
         raise HTTPException(400, "No files uploaded.")
@@ -532,6 +577,7 @@ async def ingest_documents(
     task = asyncio.create_task(_process_job(
         upload_dir, project_id, output_dir, sld_set, saved, skipped,
         len(files), total_bytes, first_ext, started,
+        context_notes=(context_notes or "").strip(),
     ))
     _INGEST_JOBS.add(task)
     task.add_done_callback(_INGEST_JOBS.discard)
@@ -1130,6 +1176,322 @@ async def get_feedback(case_id: str):
         return {"exists": False}
     rec["exists"] = True
     return rec
+
+
+# --------------------------------------------------------------------------- #
+# Per-item Evidence List feedback (👍/👎 + comments) — mirrors the Draft BOQ
+# "Rate this draft" feature, but scoped to each BOQ line so the whole evidence
+# list is ML-ready and traceable to this case (history) ID.
+# --------------------------------------------------------------------------- #
+@app.post("/api/v1/requirements/{case_id}/feedback")
+async def submit_requirement_feedback(case_id: str, request: Request):
+    """Store 👍/👎 feedback (and optional comment) for a single BOQ line item."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be a feedback object.")
+
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_")) or "UNKNOWN"
+    key = str(payload.get("requirementId") or payload.get("feedbackKey") or "").strip()
+    if not key:
+        raise HTTPException(400, "requirementId (feedbackKey) is required.")
+    feedback = str(payload.get("feedback", "")).strip().title()
+    if feedback not in ("Positive", "Negative", ""):
+        raise HTTPException(400, "feedback must be 'Positive', 'Negative' or ''.")
+    comments = str(payload.get("comments", "") or "").strip()
+
+    case_dir = config.OUTPUT_DIR / safe
+    case_dir.mkdir(parents=True, exist_ok=True)
+    path = case_dir / REQUIREMENTS_FEEDBACK_FILE
+
+    record: dict = {}
+    if path.exists():
+        try:
+            record = io_utils.read_json(path)
+        except Exception:
+            record = {}
+    if not isinstance(record, dict):
+        record = {}
+    record["caseId"] = safe
+    items = record.get("items")
+    if not isinstance(items, dict):
+        items = {}
+    entry = {
+        "requirement_id": payload.get("requirementId", key),
+        "requirement": payload.get("requirement", ""),
+        "scenario_id": payload.get("scenarioId", ""),
+        "feedback": feedback,
+        "comments": comments,
+        "updatedAt": _now(),
+    }
+    if feedback == "":
+        items.pop(key, None)  # clearing the rating removes the stored entry
+    else:
+        items[key] = entry
+    record["items"] = items
+    record["updatedAt"] = _now()
+    io_utils.write_json(path, record)
+
+    # Append to a global collection log (one JSON object per line) for ML.
+    if feedback:
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(
+                FEEDBACK_DIR / "requirements_feedback_log.jsonl", "a", encoding="utf-8"
+            ) as fh:
+                fh.write(_json.dumps({"caseId": safe, **entry}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    return {"status": "saved", "caseId": safe, "requirementId": key,
+            "feedback": feedback, "updatedAt": record["updatedAt"]}
+
+
+@app.get("/api/v1/requirements/{case_id}/feedback")
+async def get_requirement_feedback(case_id: str):
+    """Return all stored per-item BOQ-line feedback for a case."""
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    items = _load_requirements_feedback(safe)
+    return {"exists": bool(items), "caseId": safe, "items": items}
+
+
+# --------------------------------------------------------------------------- #
+# Regenerate a BOQ using the reviewer's per-line negative feedback (LLM re-pick)
+# --------------------------------------------------------------------------- #
+def _candidate_products_for_scenario(dp, scenario_id: str, limit: int = 14) -> list[dict]:
+    """Catalog products the LLM may choose from for a scenario (deduped)."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        families = dp.families_for_scenario(scenario_id)
+    except Exception:
+        families = []
+    for fam in families:
+        for prod in dp.products_for_family(fam.family_id):
+            pid = prod.product_id
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            out.append({
+                "product_id": pid,
+                "model": prod.model,
+                "description": prod.description or fam.family_name,
+                "family_name": fam.family_name,
+            })
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _regenerate_boq_from_feedback(safe: str) -> dict:
+    """Apply per-line negative feedback to a case's BOQ via the LLM re-pick.
+
+    Returns a result dict; raises HTTPException on hard errors.
+    """
+    from qualitrol_core import llm, llm_extract, boq_excel
+    from qualitrol_core.data_package import load_data_package
+
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    step2_path = case_dir / "step2_create_boq.json"
+    if not step1_path.exists() or not step2_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case to regenerate.")
+
+    step1 = io_utils.read_json(step1_path)
+    step2 = io_utils.read_json(step2_path)
+    feedback = _load_requirements_feedback(safe)
+
+    draft = step2.get("draft_boq", [])
+    # Collect lines that were thumbed-down (with the reviewer's comment).
+    flagged: list[dict] = []
+    dp = load_data_package()
+    for line in draft:
+        key = f"L{line.get('boq_line')}"
+        fb = feedback.get(key) or {}
+        if str(fb.get("feedback", "")).strip().title() != "Negative":
+            continue
+        sid = line.get("scenario_id", "")
+        flagged.append({
+            "feedbackKey": key,
+            "product_id": line.get("product_id", ""),
+            "product_model": line.get("product_model", ""),
+            "product_description": line.get("product_description", ""),
+            "scenario_id": sid,
+            "scenario_name": _scenario_name(step1, sid),
+            "quantity": line.get("quantity"),
+            "unit": line.get("unit", ""),
+            "quantity_basis": line.get("quantity_basis", ""),
+            "feedback_comment": fb.get("comments", "") or "(no comment provided)",
+            "candidates": _candidate_products_for_scenario(dp, sid),
+        })
+
+    if not flagged:
+        raise HTTPException(
+            400, "No 👎 feedback found on any BOQ line, so there is nothing to regenerate."
+        )
+
+    client = llm.get_client()
+    if not client.available:
+        raise HTTPException(
+            400,
+            "LLM is not configured, so feedback-based product re-selection is "
+            "unavailable. Configure an LLM endpoint/key to use this feature.",
+        )
+
+    project_summary = {
+        "scenarios": [
+            {"scenario_id": d.get("scenario_id"), "name": d.get("scenario"),
+             "confidence": d.get("confidence")}
+            for d in step1.get("detected_scenarios", [])
+        ],
+    }
+    decisions = llm_extract.regenerate_boq_lines(client, project_summary, flagged)
+    if not decisions:
+        raise HTTPException(502, "The LLM did not return a usable revision. Try again.")
+
+    dec_by_key = {d["feedbackKey"]: d for d in decisions}
+    prod_by_id = {p.product_id: p for p in dp.products.values()}
+
+    revised: list[dict] = []
+    changelog: list[dict] = []
+    for line in draft:
+        key = f"L{line.get('boq_line')}"
+        dec = dec_by_key.get(key)
+        if not dec:
+            revised.append(line)
+            continue
+        action = dec["action"]
+        rationale = dec.get("rationale", "")
+        before = {"product_model": line.get("product_model"),
+                  "quantity": line.get("quantity")}
+
+        if action == "remove":
+            changelog.append({"feedbackKey": key, "action": "remove",
+                              "before": before, "after": None, "rationale": rationale})
+            continue  # drop the line
+
+        new_line = dict(line)
+        if action == "replace":
+            pid = dec.get("product_id", "")
+            valid_ids = {c["product_id"] for c in
+                         next((f["candidates"] for f in flagged if f["feedbackKey"] == key), [])}
+            if pid and pid in valid_ids:
+                prod = prod_by_id.get(pid)
+                new_line["product_id"] = pid
+                new_line["product_model"] = (prod.model if prod else dec.get("product_model")) or new_line.get("product_model")
+                if prod and prod.description:
+                    new_line["product_description"] = prod.description
+            # else: keep current product (invalid/empty pick) but still note it.
+        # Apply a corrected quantity whenever the LLM supplied one (both
+        # 'adjust' and 'replace' can carry a revised quantity).
+        if action in ("adjust", "replace") and dec.get("quantity") is not None:
+            new_line["quantity"] = dec["quantity"]
+
+        note = f"Revised from reviewer feedback ({action}): {rationale}".strip()
+        new_line["assumption"] = note
+        new_line["review_status"] = "Needs Review"
+        existing_notes = (new_line.get("notes") or "").strip()
+        new_line["notes"] = (existing_notes + " | " + note).strip(" |") if existing_notes else note
+        revised.append(new_line)
+        changelog.append({"feedbackKey": key, "action": action, "before": before,
+                          "after": {"product_model": new_line.get("product_model"),
+                                    "quantity": new_line.get("quantity")},
+                          "rationale": rationale})
+
+    # Renumber and refresh the summary.
+    for i, line in enumerate(revised, start=1):
+        line["boq_line"] = i
+    step2["draft_boq"] = revised
+    step2["boq_summary"] = {
+        "total_lines": len(revised),
+        "lines_needing_review": sum(1 for b in revised if b.get("review_status") == "Needs Review"),
+        "lines_draft_ready": sum(1 for b in revised if b.get("review_status") == "Draft"),
+    }
+    step2["feedback_revision"] = {
+        "revisedAt": _now(),
+        "changes": changelog,
+    }
+
+    # Preserve the pristine original once, then persist the revised BOQ so
+    # downstream (Excel export, Step 3 pricing, history) uses the revision.
+    original_backup = case_dir / "step2_create_boq.original.json"
+    if not original_backup.exists():
+        try:
+            io_utils.write_json(original_backup, io_utils.read_json(step2_path))
+        except Exception:
+            pass
+    io_utils.write_json(step2_path, step2)
+
+    # Append the revision to a global log for later ML/tuning.
+    try:
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        with open(FEEDBACK_DIR / "boq_regeneration_log.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"caseId": safe, "revisedAt": _now(),
+                                  "changes": changelog}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    # Consume the applied feedback so it isn't mis-attached to renumbered lines
+    # on reload (the global logs above retain it for ML/tuning).
+    fb_path = case_dir / REQUIREMENTS_FEEDBACK_FILE
+    if fb_path.exists():
+        try:
+            rec = io_utils.read_json(fb_path)
+            items = rec.get("items") if isinstance(rec, dict) else None
+            if isinstance(items, dict):
+                for f in flagged:
+                    items.pop(f["feedbackKey"], None)
+                rec["items"] = items
+                rec["updatedAt"] = _now()
+                io_utils.write_json(fb_path, rec)
+        except Exception:
+            pass
+
+    # Re-export the finished BOQ Excel (best-effort).
+    try:
+        boq_excel.generate_boq_excel(step2, case_dir / f"BOQ-{safe}.xlsx")
+    except Exception:
+        pass
+
+    # Rebuild the frontend extraction from the revised BOQ.
+    uploads = case_dir / "uploads"
+    preview = _preview_for_folder(uploads) if uploads.exists() else ""
+    if not preview:
+        preview = "\n\n".join(
+            e.get("evidence_text", "") for e in step1.get("extracted_evidence", [])
+        )
+    extraction, _conf = build_extraction(
+        step1, step2, preview, {"fileName": f"Case {safe}", "fileType": "revised"}
+    )
+    return {
+        "status": "regenerated",
+        "caseId": safe,
+        "changes": changelog,
+        "extraction": extraction,
+    }
+
+
+def _scenario_name(step1: dict, scenario_id: str) -> str:
+    for d in step1.get("detected_scenarios", []):
+        if d.get("scenario_id") == scenario_id:
+            return d.get("scenario") or scenario_id
+    return scenario_id
+
+
+@app.post("/api/v1/boq/{case_id}/regenerate")
+async def regenerate_boq(case_id: str):
+    """Regenerate a case's BOQ by applying the reviewer's per-line 👎 feedback.
+
+    Uses the LLM to remove out-of-scope lines, re-pick products from the catalog,
+    or adjust quantities based on each line's feedback comment. Persists the
+    revised BOQ (keeps the original as a backup) and re-exports the Excel.
+    """
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    if not safe:
+        raise HTTPException(400, "Invalid case id.")
+    return await asyncio.to_thread(_regenerate_boq_from_feedback, safe)
 
 
 @app.get("/api/v1/docgen/download/{doc_id}")

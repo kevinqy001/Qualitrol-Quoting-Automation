@@ -394,12 +394,18 @@ def _extract_from_quantity_table(
     return assets
 
 
-def _render_pdf_page_to_b64(file_path: str, page_index: int = 0, dpi: int = 200) -> str:
+def _render_pdf_page_to_b64(
+    file_path: str, page_index: int = 0, dpi: int = 300, max_edge: int = 1568
+) -> str:
     """Render a PDF page to a base64-encoded PNG string using PyMuPDF (fitz).
 
     Returns an empty string if PyMuPDF is not installed or rendering fails.
-    The image is downscaled to ``dpi`` (default 200) to keep token costs low
-    while retaining enough detail for tag/symbol identification.
+
+    Large-format SLDs (A1/A0) rendered at a fixed DPI become huge images that
+    the vision model rejects (so the read silently fails). We therefore render
+    at ``dpi`` but then cap the longest edge to ``max_edge`` pixels (Claude's
+    recommended ~1568 px long-edge), scaling the zoom down as needed. This keeps
+    big scanned drawings within the model's accepted image size.
     """
     try:
         import fitz  # type: ignore  # PyMuPDF (optional dependency)
@@ -413,6 +419,10 @@ def _render_pdf_page_to_b64(file_path: str, page_index: int = 0, dpi: int = 200)
             page_index = 0
         page = doc[page_index]
         zoom = dpi / 72.0  # 72 dpi is the PDF default
+        rect = page.rect
+        longest_px = max(rect.width, rect.height) * zoom
+        if longest_px > max_edge and longest_px > 0:
+            zoom *= max_edge / longest_px  # cap the long edge for the vision API
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         png_bytes = pix.tobytes("png")
@@ -439,9 +449,10 @@ def _extract_from_sld_vlm(
     if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
         return []
 
-    # Render at a modest DPI: full-size SLDs at 200 dpi exceed the vision
-    # model's max image dimensions and the call fails.
-    image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=140)
+    # Render at high DPI but cap the long edge (see _render_pdf_page_to_b64) so
+    # large-format SLDs are still accepted by the vision model instead of
+    # silently failing.
+    image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=300)
     if not image_b64:
         return []
 
@@ -489,9 +500,9 @@ def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
             continue
         if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
             continue
-        # Render at a modest DPI: full-size SLDs at 200 dpi exceed the vision
-        # model's max image dimensions and the call fails.
-        image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=120)
+        # Render at high DPI but cap the long edge (see _render_pdf_page_to_b64)
+        # so large-format / scanned SLDs are accepted by the vision model.
+        image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=300)
         if not image_b64:
             continue
         text = llm_extract.extract_sld_text_vlm(client, image_b64, doc.file_name)

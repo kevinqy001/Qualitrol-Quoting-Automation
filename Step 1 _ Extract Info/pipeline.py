@@ -535,11 +535,31 @@ def _merge_requirements(rules_reqs: list[Requirement], llm_reqs: list[dict],
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+def _combine_instructions(extra_rules: str, context_notes: str) -> str:
+    """Merge operator rule-file text with user-typed project context.
+
+    ``context_notes`` is submission-specific free text (from the Step 1 UI). It
+    is appended under its own header so the LLM treats it as project context
+    that supplements — but does not override — the grounded data package.
+    """
+    context_notes = (context_notes or "").strip()
+    if not context_notes:
+        return extra_rules
+    context_block = (
+        "--- Project context provided by the sales / application engineer for "
+        "this submission (use to disambiguate scope, quantities and voltage "
+        "levels; do not invent items the evidence does not support) ---\n"
+        + context_notes
+    )
+    return f"{extra_rules}\n\n{context_block}" if extra_rules else context_block
+
+
 def run(
     project_dir: str | Path,
     project_id: str | None = None,
     output_dir: str | Path | None = None,
     sld_filenames: set[str] | None = None,
+    context_notes: str | None = None,
 ) -> dict:
     project_dir = Path(project_dir)
     if not project_dir.exists():
@@ -551,7 +571,7 @@ def run(
     docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
 
     client = llm.get_client()
-    extra_rules = load_extraction_rules()
+    extra_rules = _combine_instructions(load_extraction_rules(), context_notes)
 
     # --- P1-A: when a project supplies only drawings (no prose spec), use the
     #     VLM to read the drawing's labels/titles and inject them as text so the
@@ -601,9 +621,11 @@ def run(
             "provider": config.SETTINGS.llm_provider,
             "model": config.SETTINGS.llm_deployment if client.available else None,
             "extra_rules_applied": bool(extra_rules),
+            "user_context_applied": bool((context_notes or "").strip()),
             "scenarios_dropped_by_llm": llm_dropped,
             "sld_text_augmented_docs": sld_text_augmented,
         },
+        "user_context": (context_notes or "").strip(),
         "documents": [
             {"file_name": d.file_name, "doc_type": d.doc_type,
              "segments": len(d.segments)}

@@ -239,6 +239,18 @@ _PARAM_WEIGHT = {"Must-have": 3.0, "Preferred": 1.0, "Quantity Basis": 1.0,
 # Commercial safety default: prefer a validated model over an unverified one.
 _STATUS_RANK = {"verified": 0, "candidate": 1}
 
+# Model-name hints that indicate a SOFTWARE / master-station product (which must
+# never be sized per-DAU as if it were recorder hardware).
+_SOFTWARE_MODEL_HINTS = (
+    "iq+", "tmview", "master station", "software", "antivirus",
+    "whitelisting", "backup", "espdc",
+)
+
+
+def _is_software_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(h in m for h in _SOFTWARE_MODEL_HINTS)
+
 
 def _score_product(product, scenario_reqs: list[dict], dp: DataPackage) -> dict:
     """Score one product model against a scenario's extracted requirements.
@@ -338,6 +350,11 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
             fam_to_scenarios.setdefault(family.family_id, []).append(det)
 
     for family_id, dets in fam_to_scenarios.items():
+        # Accessory / panel / network / timing / software / service families are
+        # produced by the MEA expansion pass (quantified by the ruleset), not by
+        # this generic per-family matcher — skip them here to avoid duplicates.
+        if family_id in constants.EXPANSION_FAMILY_IDS:
+            continue
         family = dp.families[family_id]
         best_det = dets[0]
         sid = best_det["scenario_id"]
@@ -348,6 +365,20 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
         # Score every model in the family and pick the best fit (replaces the
         # previous "take products[0]" behaviour).
         products = dp.products_for_family(family_id)
+        # A recorder / DAU-sized family must be quoted as real DAU hardware
+        # (IDM+ / Informa), never as software. A data-package artifact lists
+        # iQ+ (master-station software) under the DFR family, which — sized by
+        # the per-DAU formula — produced a bogus "iQ+ x14" line. Drop software
+        # models from DAU-sized families when hardware alternatives exist.
+        fam_rule = dp.quantity_rules.get(family.default_quantity_rule_id)
+        is_dau_family = bool(
+            fam_rule and (fam_rule.count_field or "").lower()
+            in constants.DAU_SIZED_COUNT_FIELDS
+        )
+        if is_dau_family:
+            hardware = [p for p in products if not _is_software_model(p.model)]
+            if hardware:
+                products = hardware
         best = _select_best_product(products, scenario_reqs, dp)
         product = best["product"] if best else None
         pid = product.product_id if product else f"{family_id}_TBD"
@@ -568,6 +599,121 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
     return boq, summary, quantity_gaps
 
 
+def _find_kb_product(dp: DataPackage, family_id: str, keyword: str):
+    """First product in a family whose model/description contains ``keyword``."""
+    kw = keyword.lower()
+    for p in dp.products_for_family(family_id):
+        blob = f"{p.model} {p.description}".lower()
+        if kw in blob:
+            return p
+    return None
+
+
+def expand_mea_config(boq: list[BOQLine], detected: list[dict], dp: DataPackage,
+                      project_id: str) -> list[BOQLine]:
+    """Append accessories / panels / software / services per the TAQA MEA ruleset.
+
+    Runs after the base (recorder) BOQ. When recorder/DAU scope is present it
+    sizes and adds the packaging the real engineered BOQ carries — GPS timing,
+    test switches, EPG licences, network switches, field panels, LEV/PDC cabinet
+    contents and services — using the ratios in ``constants`` (sourced from the
+    CR_MEA_* rules) and product models from the reverse-populated KB families.
+    """
+    import math
+
+    rec_lines = [b for b in boq if b.scenario_id in constants.RECORDER_SCENARIO_IDS]
+    if not rec_lines:
+        return []  # no recorder scope -> nothing to package
+
+    det_ids = {d["scenario_id"] for d in detected}
+    has_pmu_wams = bool({"PMU_001", "WAMS_001"} & det_ids)
+    has_pmu = "PMU_001" in det_ids
+    # DAU proxy: one physical recorder per monitored bay ~= the largest single
+    # recorder line quantity (summing functions would triple-count the same bay).
+    n_dau = max((int(b.quantity or 0) for b in rec_lines), default=0)
+    if n_dau <= 0:
+        n_dau = 1
+    pmu_qty = max((int(b.quantity or 0) for b in rec_lines
+                   if b.scenario_id == "PMU_001"), default=0)
+    n_masters = math.ceil(n_dau / constants.MEA_DAUS_PER_GPS_MASTER) if has_pmu_wams else 0
+    n_panels = max(1, math.ceil(n_dau / constants.MEA_DEVICES_PER_PANEL))
+
+    # (family_id, model keyword, quantity, scenario_id, basis / rule)
+    specs: list[tuple] = [
+        ("PF_PANEL_ACC", "test", n_dau, "FMS_001",
+         f"Test switch per device (CR_MEA_09): {n_dau} DAU"),
+        ("PF_NET_SEC", "l2 switch", n_panels, "COMM_SCADA_001",
+         f"Managed L2 switch per panel (CR_MEA_07): {n_panels} panel(s)"),
+        ("PF_NET_SEC", "l3 switch", n_panels, "COMM_SCADA_001",
+         f"Managed L3 switch per panel (CR_MEA_07): {n_panels} panel(s)"),
+        ("PF_NET_SEC", "firewall", 2, "COMM_SCADA_001",
+         "Firewall(s) for the monitoring LAN / OETC link (CR_MEA_11)"),
+        ("PF_MON_PANEL", "fms panel", n_panels, "FMS_001",
+         f"Field panel per ~{constants.MEA_DEVICES_PER_PANEL} DAU (CR_MEA_05): {n_panels} panel(s)"),
+    ]
+    if has_pmu_wams and n_masters:
+        specs += [
+            ("PF_TIMING", "antenna", n_masters * constants.MEA_ANTENNAS_PER_MASTER,
+             "PMU_001", f"{constants.MEA_ANTENNAS_PER_MASTER} antennas per GPS master (CR_MEA_06)"),
+            ("PF_TIMING", "splitter", n_masters, "PMU_001",
+             f"GPS splitter per master; 1 master / {constants.MEA_DAUS_PER_GPS_MASTER} DAU (CR_MEA_06)"),
+        ]
+    if has_pmu and pmu_qty:
+        specs.append(
+            ("PF_SW_LIC", "epg pmu", constants.MEA_EPG_LICENSES_PER_PMU * pmu_qty,
+             "PMU_001", f"{constants.MEA_EPG_LICENSES_PER_PMU} EPG licences per PMU device (CR_MEA_08): {pmu_qty} device(s)"))
+
+    # LEV cabinet + standard contents (one per system) — CR_MEA_11.
+    lev_items = [
+        ("PF_MON_PANEL", "lev cubicle", 1, "LEV cabinet (as per Transco spec)"),
+        ("PF_MON_PANEL", "industrial rack", 1, "Industrial rack-mounted PC"),
+        ("PF_SW_LIC", "iq+", 1, "iQ+ master-station software (1 per system)"),
+        ("PF_SW_LIC", "trend micro", 1, "Trend Micro antivirus"),
+        ("PF_SW_LIC", "trellix", 1, "Trellix whitelisting"),
+        ("PF_SW_LIC", "acronis", 1, "Acronis backup"),
+        ("PF_MON_PANEL", "monitor", 1, "Monitor & keyboard"),
+        ("PF_MON_PANEL", "printer", 1, "Printer"),
+        ("PF_MON_PANEL", "annunciator", 1, "Alarm annunciator"),
+    ]
+    for fid, kw, qty, basis in lev_items:
+        specs.append((fid, kw, qty, "COMM_SCADA_001", basis + " (CR_MEA_11)"))
+    # PDC cabinet extras (only when PMU/WAMS present) — CR_MEA_12.
+    if has_pmu_wams:
+        for fid, kw, basis in [
+            ("PF_MON_PANEL", "pdc cubicle", "PDC cabinet (as per Transco spec)"),
+            ("PF_SW_LIC", "espdc", "eSPDC phasor data concentrator software"),
+            ("PF_MON_PANEL", "kvm", "KVM switch"),
+        ]:
+            specs.append((fid, kw, 1, "PMU_001", basis + " (CR_MEA_12)"))
+
+    # Services (one line each) — CR_MEA / services family.
+    for p in dp.products_for_family("PF_SERVICES"):
+        specs.append(("PF_SERVICES", p.model.lower()[:12], 1, "COMM_SCADA_001",
+                      "Engineering / commissioning service (day-rate; QR_SERVICES_001)"))
+
+    extra: list[BOQLine] = []
+    line_no = max((b.boq_line for b in boq), default=0)
+    seen: set = set()
+    for fid, kw, qty, sid, basis in specs:
+        prod = _find_kb_product(dp, fid, kw)
+        if not prod or (prod.product_id in seen):
+            continue
+        seen.add(prod.product_id)
+        line_no += 1
+        extra.append(BOQLine(
+            boq_line=line_no, project_id=project_id,
+            product_id=prod.product_id, product_model=prod.model,
+            product_description=prod.description or prod.family_name,
+            scenario_id=sid, related_assets=f"DAU count={n_dau}",
+            quantity=float(qty), unit="set",
+            quantity_basis=f"MEA ruleset — {basis}",
+            assumption="Auto-added by TAQA MEA config expansion; confirm quantities.",
+            confidence=0.55, review_status="Needs Review",
+            notes="Added by MEA ruleset expansion (CR_MEA_*).",
+        ))
+    return extra
+
+
 def _scenario_for_family(family_id: str, detected: list[dict], dp: DataPackage) -> str:
     for det in detected:
         fam = dp.families.get(family_id)
@@ -768,6 +914,17 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     boq, boq_summary, quantity_gaps = generate_boq(
         detected, matches, asset_counts, compat_flags, dp, project_id
     )
+    # TAQA MEA ruleset expansion: add accessories / panels / software / services
+    # (GPS, switches, EPG licences, test switches, LEV/PDC cabinet BoM, services)
+    # sized from the recorder scope so the BOQ reflects the engineered package.
+    mea_lines = expand_mea_config(boq, detected, dp, project_id)
+    if mea_lines:
+        boq.extend(mea_lines)
+        boq_summary["total_lines"] = len(boq)
+        boq_summary["lines_needing_review"] = sum(
+            1 for b in boq if b.review_status == "Needs Review"
+        )
+        boq_summary["mea_expansion_lines"] = len(mea_lines)
     missing = generate_missing_info(
         detected, requirements, compat_flags, quantity_gaps, dp, project_id
     )
@@ -808,8 +965,37 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     # "Is information complete?" gate: complete = at least one BOQ line and no
     # High-priority customer/engineer clarification outstanding (product-
     # capability TBD is an internal validation step, not a customer-side gap).
-    high_open = [q for q in missing if q.priority == "High"]
     has_scope = len(boq) > 0
+
+    # Never return a silent empty result: when no scope was detected, surface an
+    # explicit High-priority clarification so the UI guides the user on what to
+    # provide (esp. when only an unreadable / scanned drawing was submitted).
+    if not has_scope:
+        docs = step1.get("documents", [])
+        drawing_docs = [d for d in docs if d.get("doc_type") == "Drawing / SLD"]
+        only_drawings = bool(drawing_docs) and len(drawing_docs) == len(docs)
+        if only_drawings:
+            gap_item = "Readable specification / equipment list (or a text-based SLD)"
+            why = ("Only drawing(s)/SLD were provided and no Qualitrol monitoring scope "
+                   "could be read from them — the drawing may be a scan with no text layer, "
+                   "or its labels were not legible to the drawing reader.")
+            question = ("Please provide the project Scope of Work / specification / equipment "
+                        "list, or a higher-resolution / text-based single-line diagram, so "
+                        "requirements and a BOQ can be generated.")
+        else:
+            gap_item = "Project specification / SLD / equipment list"
+            why = ("No Qualitrol-relevant monitoring scope was detected in the submitted "
+                   "documents.")
+            question = ("Please provide a project specification, single-line diagram, or "
+                        "equipment list describing the monitoring scope.")
+        missing.insert(0, MissingInfoQuestion(
+            project_id=project_id, scenario_id="", missing_item=gap_item,
+            why_it_matters=why, question=question, priority="High",
+            owner="Sales / Customer", status="Open",
+            notes="Auto-generated: no Qualitrol scope detected in the submission.",
+        ))
+
+    high_open = [q for q in missing if q.priority == "High"]
     information_complete = has_scope and not high_open
 
     if not has_scope:

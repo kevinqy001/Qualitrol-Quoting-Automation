@@ -74,6 +74,30 @@ FIXED_ONE_COUNT_FIELD_HINTS = (
 # count fields that should be sized by the recorder/DAU formula (feeder-based).
 DAU_SIZED_COUNT_FIELDS = {"channel_count", "feeder_count"}
 
+# --------------------------------------------------------------------------- #
+# TAQA / ADNOC MEA configuration ruleset (sourced from CR_MEA_* rules in the
+# data package). Drives the Step 2 accessory / panel / software / service
+# expansion so the BOQ includes the packaging the real engineered BOQ carries,
+# not just the recorders. Editable assumptions.
+# --------------------------------------------------------------------------- #
+MEA_DAUS_PER_GPS_MASTER = 12       # CR_MEA_06: 1 GPS master per 12 DAU
+MEA_ANTENNAS_PER_MASTER = 2        # CR_MEA_06: 2 antennas per master
+MEA_EPG_LICENSES_PER_PMU = 4       # CR_MEA_08: 4 EPG licences per PMU device
+MEA_DEVICES_PER_PANEL = 4          # CR_MEA_05: max 4x 3U (or 2x 6U) per panel
+
+# Families that are emitted by the MEA expansion pass (accessories / panels /
+# network / timing / software / services), NOT by the generic per-family
+# matcher — so they are quantified by the ruleset rather than appearing twice.
+EXPANSION_FAMILY_IDS = {
+    "PF_DAU_REC", "PF_MON_PANEL", "PF_NET_SEC", "PF_TIMING",
+    "PF_SW_LIC", "PF_SERVICES", "PF_PANEL_ACC",
+}
+
+# Scenario IDs that indicate recorder / DAU scope (used to size accessories).
+RECORDER_SCENARIO_IDS = {
+    "FMS_001", "DFR_DDR_001", "PMU_001", "WAMS_001", "PQ_CLASSA_001",
+}
+
 # Count metric -> drawing asset type(s); counts are taken from the drawing
 # asset list rather than from unreliable numbers floating in spec text.
 METRIC_TO_ASSET_TYPES = {

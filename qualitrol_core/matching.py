@@ -45,8 +45,13 @@ def find_term(text_lower: str, term: str) -> int:
     return text_lower.find(term)
 
 
-def snippet(text: str, idx: int, width: int = 90) -> str:
-    """Return a readable snippet of ``text`` centered on ``idx``."""
+def snippet(text: str, idx: int, width: int = 230) -> str:
+    """Return a readable snippet of ``text`` centered on ``idx``.
+
+    ``width`` is the number of characters kept on each side of the match, so the
+    default returns roughly a short paragraph of context (~460 chars) — enough
+    to read the surrounding requirement rather than a single truncated phrase.
+    """
     if idx < 0:
         return normalize(text)[: width * 2]
     start = max(0, idx - width)

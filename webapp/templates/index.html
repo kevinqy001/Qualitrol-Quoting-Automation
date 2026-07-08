@@ -810,6 +810,40 @@
       padding: 18px 20px;
     }
 
+    .context-notes-input {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      resize: none;
+      overflow-y: auto;
+      padding: 16px 18px;
+      border: 1.5px solid #cdbfb7;
+      border-radius: var(--radius-xl);
+      background: #ffffff;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.55;
+      box-sizing: border-box;
+      box-shadow: inset 0 1px 3px rgb(63 45 38 / 0.06);
+      cursor: text;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .context-notes-input::placeholder {
+      color: #a89c96;
+    }
+
+    .context-notes-input:hover {
+      border-color: #b9a79e;
+    }
+
+    .context-notes-input:focus {
+      outline: none;
+      border-color: var(--ralliant-orange);
+      box-shadow: inset 0 1px 3px rgb(63 45 38 / 0.06), 0 0 0 3px rgb(237 84 29 / 0.12);
+    }
+
     .progress-inline {
       display: flex;
       align-items: center;
@@ -1024,6 +1058,65 @@
     .requirements-list > div {
       padding: 18px 20px;
       border-top: 1px solid #f0e8e3;
+    }
+
+    .conf-pill {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 11px;
+      border-radius: 999px;
+      background: #9aa0a6;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .conf-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #ffffff;
+      opacity: 0.85;
+    }
+
+    .evidence-jump-btn {
+      background: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 750;
+      color: var(--ralliant-orange);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+      transition: background 150ms ease, border-color 150ms ease;
+    }
+
+    .evidence-jump-btn:hover {
+      background: rgb(237 84 29 / 0.08);
+      border-color: var(--ralliant-orange);
+    }
+
+    .requirements-list article.evidence-flash {
+      animation: evidenceFlash 2.4s ease;
+      border-radius: 12px;
+    }
+
+    @keyframes evidenceFlash {
+      0%, 25% {
+        background: rgb(237 84 29 / 0.14);
+        box-shadow: inset 0 0 0 2px rgb(237 84 29 / 0.40);
+      }
+      100% {
+        background: transparent;
+        box-shadow: inset 0 0 0 2px transparent;
+      }
     }
 
     blockquote {
@@ -1404,21 +1497,10 @@
             </div>
           </div>
 
-          <aside class="signal-card">
-            <p class="section-kicker">Analysis Runtime</p>
-            <h3 class="section-heading" id="runtime-title">Loading runtime status...</h3>
-            <p class="section-copy" id="runtime-copy">Checking whether the app will call an LLM endpoint or use local rules.</p>
-            <div style="margin-top: 20px;">
-              <span class="field-label" style="margin-bottom: 12px;">Supported Inputs</span>
-              <div id="supported-types" class="chip-row" style="justify-content: flex-start;">
-                <span class="badge">Loading...</span>
-              </div>
-            </div>
-
-            <div id="eta-panel" style="margin-top: 22px;">
-              <span class="field-label">Estimated Analysis Time</span>
-              <p id="eta-summary" class="section-copy" style="margin-top: 6px; font-size: 13px;"></p>
-            </div>
+          <aside style="display:flex; flex-direction:column; min-width:0;">
+            <p class="field-label" style="margin-bottom:8px;">Project Context (optional)</p>
+            <textarea id="context-notes" class="context-notes-input"
+              placeholder="Notes for the AI — add context the documents don't state (scope, voltage levels, monitored bay counts, in/out-of-scope items).&#10;&#10;e.g. Only 132kV FMS is in scope for this lot; one IDM+ recorder per monitored bay; ignore Future / Provision bays; iQ+ software is one per system."></textarea>
           </aside>
         </div>
 
@@ -1442,6 +1524,7 @@
             <span class="spinner"></span>
             <span>Extracting file text, selecting Qualitrol requirements, and preparing evidence snippets...</span>
           </div>
+          <p id="eta-summary" class="section-copy" style="margin-top: 10px; font-size: 13px;"></p>
         </div>
 
         <div id="upload-result" class="hidden card" style="margin-top: 18px;">
@@ -1520,15 +1603,7 @@
           </div>
         </div>
 
-        <div class="review-grid" style="margin-top: 18px;">
-          <div class="card">
-            <div class="card-head">
-              <h3 class="section-heading">Source Text Preview</h3>
-              <span class="badge" id="source-badge">raw_specification.txt</span>
-            </div>
-            <pre id="source-doc">Loading source document...</pre>
-          </div>
-
+        <div style="margin-top: 18px;">
           <div class="card">
             <div class="card-head">
               <h3 class="section-heading">Draft BOQ — Qualitrol Product Lines</h3>
@@ -1543,10 +1618,11 @@
                     <th>Description</th>
                     <th class="text-right">Qty</th>
                     <th>Scenario</th>
+                    <th class="text-right">Evidence</th>
                   </tr>
                 </thead>
                 <tbody id="boq-table-body">
-                  <tr><td colspan="5" style="text-align:center; color: var(--muted); padding: 32px;">Loading BOQ...</td></tr>
+                  <tr><td colspan="6" style="text-align:center; color: var(--muted); padding: 32px;">Loading BOQ...</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1565,6 +1641,12 @@
                 </svg>
                 <span>Download BOQ (Excel)</span>
               </a>
+              <button class="btn-secondary hidden" id="btn-regenerate-boq" title="Use your 👎 feedback comments to re-pick products / adjust quantities and regenerate this BOQ">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356M2.985 19.644v-4.992h4.992M19.5 8.25a7.5 7.5 0 00-13.02-2.34L2.985 9.348m18.03 5.304l-3.495 3.438A7.5 7.5 0 014.5 15.75"/>
+                </svg>
+                <span>Apply feedback &amp; regenerate</span>
+              </button>
               <button class="btn-primary" id="btn-edit-boq">
                 <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/>
@@ -1577,12 +1659,15 @@
 
         <div class="card" style="margin-top: 18px;">
           <div class="card-head" style="cursor:pointer;user-select:none;" onclick="toggleCollapsible('requirements-list','requirements-chevron')">
-            <h3 class="section-heading">Requirement Evidence List</h3>
-            <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" onclick="event.stopPropagation();toggleCollapsible('requirements-list','requirements-chevron','requirements-label')">
-              <span id="requirements-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(0deg);">▾</span><span id="requirements-label">Expand</span>
+            <div style="min-width:0;">
+              <h3 class="section-heading">Why These Products — Evidence &amp; Recommendation Basis</h3>
+              <p class="section-copy" style="margin-top:4px; font-size:12px;">For each BOQ line: why the product was recommended and the source text it was derived from. Confidence reflects how strongly the documents support the line — combining evidence strength, drawing/asset corroboration, and product-parameter match.</p>
+            </div>
+            <button type="button" style="background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;flex-shrink:0;" onclick="event.stopPropagation();toggleCollapsible('requirements-list','requirements-chevron','requirements-label')">
+              <span id="requirements-chevron" style="display:inline-block;transition:transform .2s;transform:rotate(-180deg);">▾</span><span id="requirements-label">Collapse</span>
             </button>
           </div>
-          <div id="requirements-list" class="requirements-list" style="display:none;">
+          <div id="requirements-list" class="requirements-list" style="display:block;">
             <div style="text-align:center; color: var(--muted);">No requirements loaded yet</div>
           </div>
         </div>
@@ -1905,6 +1990,30 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=24"></script>
+  <!-- ── Requirement item feedback modal: capture per-item negative comments ── -->
+  <div id="req-feedback-modal" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="req-feedback-title">
+    <div class="history-panel" style="max-width:540px;">
+      <div class="history-head">
+        <div style="flex:1;">
+          <p class="section-kicker" style="margin-bottom:4px;">Feedback</p>
+          <h2 class="section-heading" id="req-feedback-title">What's wrong with this item?</h2>
+          <p class="section-copy" id="req-fb-target" style="margin:0;"></p>
+        </div>
+        <button id="btn-req-fb-close" class="file-pill-remove" type="button" aria-label="Close feedback" style="width:34px;height:34px;">×</button>
+      </div>
+      <div style="padding:14px 20px;">
+        <textarea id="req-fb-comment" rows="5" class="field-input" style="width:100%; resize:vertical;" placeholder="Tell us what's wrong with this product line (wrong product, wrong quantity, wrong scenario, not relevant, missing context, etc.)…"></textarea>
+      </div>
+      <div class="history-foot">
+        <span class="section-copy" style="font-size:12px;">Your rating and comment are linked to this BOQ line and case ID.</span>
+        <div style="display:flex; gap:8px; flex:0 0 auto;">
+          <button id="btn-req-fb-cancel" class="btn-secondary" type="button" style="min-height:36px;">Cancel</button>
+          <button id="btn-req-fb-submit" class="btn-primary" type="button" style="min-height:36px;">Submit feedback</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=29"></script>
 </body>
 </html>
