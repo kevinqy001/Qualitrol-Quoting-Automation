@@ -252,6 +252,24 @@ def _is_software_model(model: str) -> bool:
     return any(h in m for h in _SOFTWARE_MODEL_HINTS)
 
 
+def _unit_for(family_id: str, family_name: str, model: str) -> str:
+    """Category-aware BOQ unit (instead of a blanket 'set').
+
+    - Services            -> 'lot'   (day-rate / scope; days confirmed by engineer)
+    - Software / licences  -> 'license'
+    - Everything else (DAU hardware, panels, network, timing, accessories) -> 'ea'
+    """
+    fid = family_id or ""
+    fn = (family_name or "").lower()
+    m = (model or "").lower()
+    if fid == "PF_SERVICES" or "service" in fn:
+        return "lot"
+    if (fid == "PF_SW_LIC" or "software" in fn or "platform" in fn
+            or "licen" in fn or "licen" in m):
+        return "license"
+    return "ea"
+
+
 def _score_product(product, scenario_reqs: list[dict], dp: DataPackage) -> dict:
     """Score one product model against a scenario's extracted requirements.
 
@@ -583,7 +601,7 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
             scenario_id=scenario_id,
             related_assets=_related_assets(scenario_id, asset_counts),
             quantity=qty,
-            unit=unit,
+            unit=_unit_for(match.family_id, match.family_name, match.candidate_model),
             quantity_basis=basis,
             assumption=assumption,
             confidence=match.match_score,
@@ -705,7 +723,8 @@ def expand_mea_config(boq: list[BOQLine], detected: list[dict], dp: DataPackage,
             product_id=prod.product_id, product_model=prod.model,
             product_description=prod.description or prod.family_name,
             scenario_id=sid, related_assets=f"DAU count={n_dau}",
-            quantity=float(qty), unit="set",
+            quantity=float(qty),
+            unit=_unit_for(prod.family_id, prod.family_name, prod.model),
             quantity_basis=f"MEA ruleset — {basis}",
             assumption="Auto-added by TAQA MEA config expansion; confirm quantities.",
             confidence=0.55, review_status="Needs Review",
