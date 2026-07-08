@@ -719,7 +719,7 @@
       return;
     }
     list.innerHTML = requirements
-      .map((req) => {
+      .map((req, i) => {
         // Pull the requirement "type" out as the headline badge; render any
         // remaining technical params as chips instead of raw JSON.
         const params = { ...(req.technicalParams || {}) };
@@ -756,10 +756,196 @@
             </div>
           </div>
           <blockquote>${escapeHtml(req.evidence || "No evidence snippet returned")}</blockquote>
+          ${requirementFbControl(req, i)}
         </article>`;
       })
       .join("");
   }
+
+  // ── Per-item Requirement feedback (👍/👎 + comments) ────────────────────
+  // Mirrors the Draft BOQ "Rate this draft" control, scoped to each evidence
+  // item. State lives on the requirement object (feedback/comments) and is
+  // persisted server-side via /requirements/{caseId}/feedback.
+  function reqFbKey(req, i) {
+    return req.feedbackKey || req.requirement_id || `IDX-${i}`;
+  }
+
+  function requirementFbControl(req, i) {
+    if (IS_STATIC) return ""; // no backend to record feedback in the static demo
+    const key = reqFbKey(req, i);
+    const fb = req.feedback || "";
+    const upCls = fb === "Positive" ? " selected-up" : fb === "Negative" ? " dim" : "";
+    const downCls = fb === "Negative" ? " selected-down" : fb === "Positive" ? " dim" : "";
+    const statusTxt =
+      fb === "Positive" ? "Marked helpful 👍" : fb === "Negative" ? "Feedback recorded 👎" : "";
+    const statusColor = fb === "Negative" ? "var(--ralliant-orange)" : "var(--success)";
+    const k = escapeHtml(String(key));
+    return `<div class="fb-group req-fb" data-fbkey="${k}" style="display:inline-flex; margin:14px 0 0;">
+      <span class="fb-label">Rate this item</span>
+      <span class="fb-btns">
+        <button class="fb-btn req-fb-btn${upCls}" data-act="up" data-fbkey="${k}" type="button" title="This item looks right" aria-label="Thumbs up">👍</button>
+        <button class="fb-btn req-fb-btn${downCls}" data-act="down" data-fbkey="${k}" type="button" title="Not right — tell us why" aria-label="Thumbs down">👎</button>
+      </span>
+      <span class="fb-status req-fb-status" data-fbkey="${k}" style="color:${statusColor};">${statusTxt}</span>
+    </div>`;
+  }
+
+  function findRequirementByKey(key) {
+    const reqs = (currentExtraction && currentExtraction.requirements) || [];
+    for (let i = 0; i < reqs.length; i++) {
+      if (reqFbKey(reqs[i], i) === key) return { req: reqs[i], index: i };
+    }
+    return null;
+  }
+
+  function setReqFbState(key, feedback, opts) {
+    opts = opts || {};
+    const scope = $("#requirements-list");
+    if (!scope) return;
+    const up = scope.querySelector(`.req-fb-btn[data-act="up"][data-fbkey="${cssEsc(key)}"]`);
+    const down = scope.querySelector(`.req-fb-btn[data-act="down"][data-fbkey="${cssEsc(key)}"]`);
+    const status = scope.querySelector(`.req-fb-status[data-fbkey="${cssEsc(key)}"]`);
+    const positive = feedback === "Positive";
+    const negative = feedback === "Negative";
+    if (up) {
+      up.classList.toggle("selected-up", positive);
+      up.classList.toggle("dim", negative);
+    }
+    if (down) {
+      down.classList.toggle("selected-down", negative);
+      down.classList.toggle("dim", positive);
+    }
+    if (status && !opts.skipStatus) {
+      if (opts.saving) {
+        status.innerHTML = `<span class="fb-spinner" aria-hidden="true"></span><span>Saving…</span>`;
+        status.style.color = "var(--muted)";
+      } else if (opts.error) {
+        status.textContent = "Couldn't save — try again";
+        status.style.color = "var(--ralliant-orange)";
+      } else {
+        status.textContent = positive
+          ? "Marked helpful 👍"
+          : negative
+            ? "Feedback recorded 👎"
+            : "";
+        status.style.color = negative ? "var(--ralliant-orange)" : "var(--success)";
+      }
+    }
+  }
+
+  // Escape a value for use inside a CSS attribute selector.
+  function cssEsc(value) {
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  async function submitRequirementFeedback(key, feedback, comments) {
+    const found = findRequirementByKey(key);
+    if (!found) return;
+    const caseId =
+      currentExtraction && (currentExtraction.caseReference || currentExtraction.boqId);
+    if (!caseId) return;
+    // Optimistic UI.
+    found.req.feedback = feedback;
+    found.req.comments = comments || "";
+    setReqFbState(key, feedback, { saving: true });
+    try {
+      const res = await fetch(
+        `${API}/requirements/${encodeURIComponent(caseId)}/feedback`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requirementId: key,
+            requirement: found.req.requirement || "",
+            scenarioId: found.req.scenario_id || found.req.productCode || "",
+            feedback,
+            comments: comments || "",
+          }),
+        }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setReqFbState(key, feedback);
+      persistRequirementFeedback();
+    } catch (err) {
+      setReqFbState(key, feedback, { error: true });
+    }
+  }
+
+  // Update the localStorage history snapshot so per-item feedback survives a
+  // page reload / History revisit (server-side storage is the source of truth).
+  function persistRequirementFeedback() {
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (!caseId) return;
+    const list = loadHistory();
+    const rec = list.find((c) => c.caseId === caseId);
+    if (rec && rec.extraction) {
+      rec.extraction.requirements = currentExtraction.requirements;
+      writeHistory(list);
+    }
+  }
+
+  // ── Requirement feedback comment modal (negative feedback) ──────────────
+  let pendingReqFbKey = null;
+
+  function openReqFbModal(key) {
+    const found = findRequirementByKey(key);
+    pendingReqFbKey = key;
+    const ta = $("#req-fb-comment");
+    if (ta) ta.value = (found && found.req.comments) || "";
+    const target = $("#req-fb-target");
+    if (target) {
+      target.textContent = found
+        ? `Item: ${found.req.requirement || "Untitled requirement"}`
+        : "";
+    }
+    const modal = $("#req-feedback-modal");
+    if (modal) modal.classList.remove("hidden");
+    setTimeout(() => ta && ta.focus(), 40);
+  }
+
+  function closeReqFbModal() {
+    const modal = $("#req-feedback-modal");
+    if (modal) modal.classList.add("hidden");
+    pendingReqFbKey = null;
+  }
+
+  if ($("#requirements-list")) {
+    $("#requirements-list").addEventListener("click", (e) => {
+      const btn = e.target.closest(".req-fb-btn");
+      if (!btn) return;
+      const key = btn.dataset.fbkey;
+      if (btn.dataset.act === "up") {
+        submitRequirementFeedback(key, "Positive", "");
+      } else {
+        openReqFbModal(key);
+      }
+    });
+  }
+  if ($("#btn-req-fb-close")) $("#btn-req-fb-close").addEventListener("click", closeReqFbModal);
+  if ($("#btn-req-fb-cancel")) $("#btn-req-fb-cancel").addEventListener("click", closeReqFbModal);
+  if ($("#btn-req-fb-submit")) {
+    $("#btn-req-fb-submit").addEventListener("click", async () => {
+      const key = pendingReqFbKey;
+      if (!key) return closeReqFbModal();
+      const comment = ($("#req-fb-comment").value || "").trim();
+      closeReqFbModal();
+      await submitRequirementFeedback(key, "Negative", comment);
+    });
+  }
+  if ($("#req-feedback-modal")) {
+    $("#req-feedback-modal").addEventListener("click", (e) => {
+      if (e.target === $("#req-feedback-modal")) closeReqFbModal();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (
+      e.key === "Escape" &&
+      $("#req-feedback-modal") &&
+      !$("#req-feedback-modal").classList.contains("hidden")
+    ) {
+      closeReqFbModal();
+    }
+  });
 
   async function loadSampleBoq() {
     try {

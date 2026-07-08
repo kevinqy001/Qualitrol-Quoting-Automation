@@ -214,6 +214,28 @@ def _preview_for_folder(folder: Path, limit: int = 6000) -> str:
     return ("\n\n".join(parts))[:limit]
 
 
+REQUIREMENTS_FEEDBACK_FILE = "requirements_feedback.json"
+
+
+def _requirements_feedback_path(project_id: str) -> Path:
+    return config.OUTPUT_DIR / project_id / REQUIREMENTS_FEEDBACK_FILE
+
+
+def _load_requirements_feedback(project_id: str) -> dict:
+    """Return stored per-item requirement feedback as {key: {feedback, comments}}."""
+    if not project_id:
+        return {}
+    path = _requirements_feedback_path(project_id)
+    if not path.exists():
+        return {}
+    try:
+        rec = io_utils.read_json(path)
+    except Exception:
+        return {}
+    items = rec.get("items") if isinstance(rec, dict) else None
+    return items if isinstance(items, dict) else {}
+
+
 def build_extraction(
     step1: dict,
     step2: dict,
@@ -229,6 +251,11 @@ def build_extraction(
     evidence_by_id = {
         e.get("evidence_id"): e for e in step1.get("extracted_evidence", [])
     }
+
+    # Restore any per-item feedback (👍/👎 + comments) previously stored for
+    # this case, keyed by requirement_id (or IDX-<n> when no id is present), so
+    # every requirement in the output carries its own feedback/comments fields.
+    req_feedback = _load_requirements_feedback(project_id)
 
     # --- Requirement evidence list (Step 1 structured requirements) --------- #
     requirements: list[dict] = []
@@ -252,6 +279,10 @@ def build_extraction(
             or "No evidence snippet returned."
         )
 
+        # Stable per-item key used to persist/restore this item's feedback.
+        req_key = req.get("requirement_id") or f"IDX-{len(requirements)}"
+        stored_fb = req_feedback.get(req_key, {})
+
         requirements.append(
             {
                 "category": req.get("scenario") or "Requirement",
@@ -261,6 +292,23 @@ def build_extraction(
                 "technicalParams": tech_params,
                 "confidence": req.get("confidence", 0.0),
                 "evidence": evidence_text,
+                # Raw Step 1 fields preserved as context for per-item feedback
+                # (logging / traceability to the source requirement).
+                "requirement_id": req.get("requirement_id") or "",
+                "scenario": req.get("scenario") or "",
+                "scenario_id": req.get("scenario_id") or "",
+                "metric_id": req.get("metric_id") or "",
+                "metric_name": req.get("metric_name") or "",
+                "parameter_value": value,
+                "requirement_type": req.get("requirement_type") or "",
+                "asset_type": req.get("asset_type") or "",
+                "evidence_id": req.get("evidence_id") or "",
+                # Per-item feedback (mirrors the Draft BOQ "Rate this draft"
+                # feature): 👍/👎 label + optional user comment, restored from
+                # the case's stored requirements feedback.
+                "feedbackKey": req_key,
+                "feedback": stored_fb.get("feedback", ""),
+                "comments": stored_fb.get("comments", ""),
             }
         )
 
@@ -1130,6 +1178,85 @@ async def get_feedback(case_id: str):
         return {"exists": False}
     rec["exists"] = True
     return rec
+
+
+# --------------------------------------------------------------------------- #
+# Per-item Requirement Evidence List feedback (👍/👎 + comments) — mirrors the
+# Draft BOQ "Rate this draft" feature, but scoped to each requirement item so
+# the whole evidence list is ML-ready and traceable to this case (history) ID.
+# --------------------------------------------------------------------------- #
+@app.post("/api/v1/requirements/{case_id}/feedback")
+async def submit_requirement_feedback(case_id: str, request: Request):
+    """Store 👍/👎 feedback (and optional comment) for a single requirement item."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be a feedback object.")
+
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_")) or "UNKNOWN"
+    key = str(payload.get("requirementId") or payload.get("feedbackKey") or "").strip()
+    if not key:
+        raise HTTPException(400, "requirementId (feedbackKey) is required.")
+    feedback = str(payload.get("feedback", "")).strip().title()
+    if feedback not in ("Positive", "Negative", ""):
+        raise HTTPException(400, "feedback must be 'Positive', 'Negative' or ''.")
+    comments = str(payload.get("comments", "") or "").strip()
+
+    case_dir = config.OUTPUT_DIR / safe
+    case_dir.mkdir(parents=True, exist_ok=True)
+    path = case_dir / REQUIREMENTS_FEEDBACK_FILE
+
+    record: dict = {}
+    if path.exists():
+        try:
+            record = io_utils.read_json(path)
+        except Exception:
+            record = {}
+    if not isinstance(record, dict):
+        record = {}
+    record["caseId"] = safe
+    items = record.get("items")
+    if not isinstance(items, dict):
+        items = {}
+    entry = {
+        "requirement_id": payload.get("requirementId", key),
+        "requirement": payload.get("requirement", ""),
+        "scenario_id": payload.get("scenarioId", ""),
+        "feedback": feedback,
+        "comments": comments,
+        "updatedAt": _now(),
+    }
+    if feedback == "":
+        items.pop(key, None)  # clearing the rating removes the stored entry
+    else:
+        items[key] = entry
+    record["items"] = items
+    record["updatedAt"] = _now()
+    io_utils.write_json(path, record)
+
+    # Append to a global collection log (one JSON object per line) for ML.
+    if feedback:
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(
+                FEEDBACK_DIR / "requirements_feedback_log.jsonl", "a", encoding="utf-8"
+            ) as fh:
+                fh.write(_json.dumps({"caseId": safe, **entry}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    return {"status": "saved", "caseId": safe, "requirementId": key,
+            "feedback": feedback, "updatedAt": record["updatedAt"]}
+
+
+@app.get("/api/v1/requirements/{case_id}/feedback")
+async def get_requirement_feedback(case_id: str):
+    """Return all stored per-item requirement feedback for a case."""
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    items = _load_requirements_feedback(safe)
+    return {"exists": bool(items), "caseId": safe, "items": items}
 
 
 @app.get("/api/v1/docgen/download/{doc_id}")
