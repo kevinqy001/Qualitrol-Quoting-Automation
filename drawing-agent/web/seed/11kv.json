@@ -1,0 +1,369 @@
+{
+  "meta": {
+    "width": 4967,
+    "height": 3509,
+    "title": "11kV GIS Single Line Diagram \u2014 KEZAD (KB1A)",
+    "project": "N-19876 \u00b7 KIZAD-B1 \u00b7 TAQA",
+    "file": "11kv.png",
+    "note": "Prototype detection covers the BUSBAR-1 feeder row (K01\u2013K19)."
+  },
+  "detections": [
+    {
+      "id": "D001",
+      "type": "gis_bay",
+      "label": "K01 \u00b7 Bus Section 4-1",
+      "bbox": [
+        599,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K01 \u2014 Bus Section 4-1 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K01",
+        "function": "bus_section"
+      }
+    },
+    {
+      "id": "D002",
+      "type": "gis_bay",
+      "label": "K02 \u00b7 Cable Feeder 1",
+      "bbox": [
+        718,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K02 \u2014 Cable Feeder 1 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K02",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D003",
+      "type": "gis_bay",
+      "label": "K03 \u00b7 Cable Feeder 2",
+      "bbox": [
+        837,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K03 \u2014 Cable Feeder 2 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K03",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D004",
+      "type": "gis_bay",
+      "label": "K04 \u00b7 Aux Trafo 1",
+      "bbox": [
+        956,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K04 \u2014 Aux Trafo 1 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K04",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D005",
+      "type": "gis_bay",
+      "label": "K05 \u00b7 Cable Feeder 3",
+      "bbox": [
+        1075,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K05 \u2014 Cable Feeder 3 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K05",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D006",
+      "type": "gis_bay",
+      "label": "K06 \u00b7 Cable Feeder 4",
+      "bbox": [
+        1194,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K06 \u2014 Cable Feeder 4 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K06",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D007",
+      "type": "gis_bay",
+      "label": "K07 \u00b7 Cable Feeder 5",
+      "bbox": [
+        1313,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K07 \u2014 Cable Feeder 5 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K07",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D008",
+      "type": "gis_bay",
+      "label": "K08 \u00b7 Cable Feeder 6",
+      "bbox": [
+        1432,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K08 \u2014 Cable Feeder 6 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K08",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D009",
+      "type": "gis_bay",
+      "label": "K09 \u00b7 Cable Feeder 7",
+      "bbox": [
+        1551,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K09 \u2014 Cable Feeder 7 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K09",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D010",
+      "type": "gis_bay",
+      "label": "K10 \u00b7 Incomer-1",
+      "bbox": [
+        1670,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K10 \u2014 Incomer-1 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K10",
+        "function": "trans_incomer"
+      }
+    },
+    {
+      "id": "D011",
+      "type": "gis_bay",
+      "label": "K11 \u00b7 Cable Feeder 8",
+      "bbox": [
+        1789,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K11 \u2014 Cable Feeder 8 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K11",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D012",
+      "type": "gis_bay",
+      "label": "K12 \u00b7 Cable Feeder 9",
+      "bbox": [
+        1908,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K12 \u2014 Cable Feeder 9 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K12",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D013",
+      "type": "gis_bay",
+      "label": "K13 \u00b7 Cable Feeder 10",
+      "bbox": [
+        2027,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K13 \u2014 Cable Feeder 10 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K13",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D014",
+      "type": "gis_bay",
+      "label": "K14 \u00b7 Capacitor Bank-1",
+      "bbox": [
+        2146,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.9,
+      "note": "11kV GIS bay K14 \u2014 Capacitor Bank-1 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K14",
+        "function": "cap_bank"
+      }
+    },
+    {
+      "id": "D015",
+      "type": "gis_bay",
+      "label": "K15 \u00b7 Cable Feeder 11",
+      "bbox": [
+        2265,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K15 \u2014 Cable Feeder 11 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K15",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D016",
+      "type": "gis_bay",
+      "label": "K16 \u00b7 Cable Feeder 12",
+      "bbox": [
+        2384,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K16 \u2014 Cable Feeder 12 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K16",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D017",
+      "type": "gis_bay",
+      "label": "K17 \u00b7 Bus Section 1-2",
+      "bbox": [
+        2503,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K17 \u2014 Bus Section 1-2 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K17",
+        "function": "bus_section"
+      }
+    },
+    {
+      "id": "D018",
+      "type": "gis_bay",
+      "label": "K18 \u00b7 Cable Feeder 13",
+      "bbox": [
+        2622,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K18 \u2014 Cable Feeder 13 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K18",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D019",
+      "type": "gis_bay",
+      "label": "K19 \u00b7 Cable Feeder 14",
+      "bbox": [
+        2741,
+        615,
+        104,
+        430
+      ],
+      "confidence": 0.92,
+      "note": "11kV GIS bay K19 \u2014 Cable Feeder 14 (BUSBAR-1)",
+      "status": "pending",
+      "props": {
+        "bay": "K19",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D020",
+      "type": "busbar",
+      "label": "BUSBAR-1 (2500A)",
+      "bbox": [
+        560,
+        598,
+        1900,
+        14
+      ],
+      "confidence": 0.9,
+      "note": "11kV busbar-1",
+      "status": "pending",
+      "props": {}
+    }
+  ]
+}
