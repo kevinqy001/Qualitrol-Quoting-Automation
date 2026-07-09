@@ -1,0 +1,51 @@
+name: CI
+
+# Fast quality gate that must pass before merging to main (and runs on dev too).
+# Keep this lightweight and deterministic (rules-only, no LLM/network) so it is a
+# reliable required check. Grow it with real pytest tests over time.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - dev
+
+jobs:
+  build-and-smoke:
+    name: build-and-smoke
+    runs-on: ubuntu-latest
+    env:
+      # Force rules-only so CI never depends on Foundry/LLM credentials or network.
+      QUALITROL_USE_LLM: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: App imports (wiring / syntax check)
+        run: python -c "import app; print('app import OK')"
+
+      - name: Pipeline CLIs wire up
+        run: |
+          python "Step 1 _ Extract Info/run.py" --help
+          python "Step 2 _ Create BOQ/run.py" --help
+
+      - name: Run tests (if present)
+        run: |
+          if [ -d tests ]; then
+            pip install pytest
+            pytest -q
+          else
+            echo "No tests/ directory yet - skipping. Add tests under tests/."
+          fi
