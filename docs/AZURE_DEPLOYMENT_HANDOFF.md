@@ -3,9 +3,21 @@
 **App:** Qualitrol Quote Accelerator (FastAPI / Python ASGI)
 **Repo:** https://github.com/RAL-Digital-CX/Qualitrol-Quoting-Automation
 **Prepared:** 2026-07-08 by automated setup session
-**Status:** 🟢 **Dev deployed to UK West.** The App Service VM quota increase landed in **UK West** and **West Europe** (NOT East US / UK South / North Europe). Dev app is provisioned in **UK West** for the UK-based team. Prod pending validation of Dev.
+**Status:** 🟢 **Dev + Prod deployed to UK West.** Both apps are live. Branch protection on `main` requires PRs. **EasyAuth is pending Entra admin action** (see [EasyAuth setup](#easyauth-microsoft-entra-id--pending-admin)).
 
-> **Region note:** The resource groups are tagged `eastus`, but a Web App can live in any region (the RG location is only metadata). Dev runs in **UK West**; Prod should follow (UK West or West Europe — both have confirmed quota).
+> **Region note:** The resource groups are tagged `eastus`, but a Web App can live in any region (the RG location is only metadata). Both apps run in **UK West**.
+
+### Live environments
+| Env | URL | Region | Deploy trigger |
+|---|---|---|---|
+| Dev | https://qtc-quote-accelerator-dev.azurewebsites.net | UK West | push to `dev` |
+| Prod | https://qtc-quote-accelerator-prod.azurewebsites.net | UK West | merge PR to `main` (protected) |
+
+### Branch protection (main)
+`main` is protected: **PR required with 1 approving review**, stale reviews dismissed, **enforced for admins**, no force-push/deletion. Prod releases only via reviewed PRs.
+
+### Drawing Agent — intentionally offline
+`drawing-agent/` is a **separate standalone service** (own `app.py`/`startup.sh`/`requirements.txt`). The deploy workflow ships only the **repo root**, so the drawing agent is **not deployed or hosted** by this pipeline. Leave as-is to keep it offline. To host it later, it needs its own App Service + workflow.
 
 ---
 
@@ -203,16 +215,103 @@ Notes:
 
 ---
 
+---
+
+## EasyAuth (Microsoft Entra ID) — PENDING ADMIN
+
+**Goal:** Front both App Services with App Service Authentication ("EasyAuth") using **Microsoft Entra ID**, single-tenant (`ralliant.onmicrosoft.com`), redirecting unauthenticated users to sign-in.
+
+### ⛔ Blocker: cannot self-register app registrations
+The tenant policy has **`allowedToCreateApps: False`** and the deploying user (`Kunal.Dovedy@icgna.com`) holds **no privileged directory role**. EasyAuth (Entra) requires **one app registration per web app**. An **Entra admin** (Application Administrator / Cloud Application Administrator / Global Admin) must create them — hence the ticket below.
+
+### 🎫 Ticket details — request TWO app registrations
+Ask the Entra admin to create the following in tenant **`ralliant.onmicrosoft.com`** (`523cf7c2-a9b1-496c-b186-811193b6880f`):
+
+**App registration #1 — Dev**
+| Field | Value |
+|---|---|
+| Display name | `qtc-quote-accelerator-dev-easyauth` |
+| Supported account types | **Single tenant** (Accounts in this org directory only) |
+| Platform | **Web** |
+| Redirect URI (callback) | `https://qtc-quote-accelerator-dev.azurewebsites.net/.auth/login/aad/callback` |
+| Front-channel logout URL | `https://qtc-quote-accelerator-dev.azurewebsites.net/.auth/logout` |
+| Home page URL | `https://qtc-quote-accelerator-dev.azurewebsites.net` |
+| ID tokens (implicit/hybrid) | **Enabled** (for App Service auth code flow) |
+| Client secret | Create one; share securely for the app config |
+
+**App registration #2 — Prod**
+| Field | Value |
+|---|---|
+| Display name | `qtc-quote-accelerator-prod-easyauth` |
+| Supported account types | **Single tenant** |
+| Platform | **Web** |
+| Redirect URI (callback) | `https://qtc-quote-accelerator-prod.azurewebsites.net/.auth/login/aad/callback` |
+| Front-channel logout URL | `https://qtc-quote-accelerator-prod.azurewebsites.net/.auth/logout` |
+| Home page URL | `https://qtc-quote-accelerator-prod.azurewebsites.net` |
+| ID tokens (implicit/hybrid) | **Enabled** |
+| Client secret | Create one; share securely for the app config |
+
+**FQDNs (for reference):**
+- Dev:  `https://qtc-quote-accelerator-dev.azurewebsites.net`
+- Prod: `https://qtc-quote-accelerator-prod.azurewebsites.net`
+
+> If custom domains are added later, add each custom domain's `/.auth/login/aad/callback` as an additional redirect URI.
+
+### What the admin returns to you (per environment)
+- **Application (client) ID**
+- **Client secret value**
+- (Tenant ID is already known: `523cf7c2-a9b1-496c-b186-811193b6880f`)
+
+### Finishing EasyAuth once the app IDs + secrets exist
+Run per environment (issuer is the single-tenant v2.0 endpoint):
+```bash
+TENANT=523cf7c2-a9b1-496c-b186-811193b6880f
+
+# --- Dev ---
+az webapp auth microsoft update \
+  -g QTC-ProjectQuoteAccelerator-Dev -n qtc-quote-accelerator-dev \
+  --client-id <DEV_APP_CLIENT_ID> \
+  --client-secret <DEV_CLIENT_SECRET> \
+  --issuer "https://login.microsoftonline.com/$TENANT/v2.0" \
+  --tenant-id "$TENANT"
+az webapp auth update \
+  -g QTC-ProjectQuoteAccelerator-Dev -n qtc-quote-accelerator-dev \
+  --enabled true --action RedirectToLoginPage \
+  --redirect-provider AzureActiveDirectory \
+  --unauthenticated-client-action RedirectToLoginPage
+
+# --- Prod --- (same, with prod names/IDs)
+az webapp auth microsoft update \
+  -g QTC-ProjectQuoteAccelerator-Prod -n qtc-quote-accelerator-prod \
+  --client-id <PROD_APP_CLIENT_ID> \
+  --client-secret <PROD_CLIENT_SECRET> \
+  --issuer "https://login.microsoftonline.com/$TENANT/v2.0" \
+  --tenant-id "$TENANT"
+az webapp auth update \
+  -g QTC-ProjectQuoteAccelerator-Prod -n qtc-quote-accelerator-prod \
+  --enabled true --action RedirectToLoginPage \
+  --redirect-provider AzureActiveDirectory \
+  --unauthenticated-client-action RedirectToLoginPage
+```
+Verify: an unauthenticated `curl -sI https://<host>/` should return **302** to `login.microsoftonline.com`. A browser hit should prompt Entra sign-in and then load the app.
+
+> Store client secrets in Key Vault or app settings only — never commit them. The deploying user (Contributor on RG) **can** run the `az webapp auth` commands above; only the app *registration* needs admin.
+
+---
+
 ## Decisions already made (for context)
 - Region: **UK West** (quota available there; UK-based team). West Europe is the fallback.
 - SKU: **B1** both envs.
-- CI/CD auth: **publish-profile secrets** (OIDC not viable — Blocker #2).
+- CI/CD auth: **publish-profile secrets** (OIDC not viable — Blocker #2). SCM basic auth enabled on both apps to allow publish-profile deploys.
 - Existing `main_*` workflow: **replaced** with `deploy-appservice.yml`.
 - Python: **3.14**.
-- Rollout order: **Dev first**, then Prod.
+- Rollout order: **Dev first**, then Prod. Both now live.
+- `main` **branch-protected**: PR + 1 review, enforced for admins.
+- **Drawing Agent** (`drawing-agent/`): intentionally **not deployed** (kept offline).
+- **EasyAuth**: Entra, single-tenant, RedirectToLoginPage — pending admin app registrations.
 
 ## Open questions for the team
-1. Who is the subscription admin who can raise the App Service quota (Blocker #1)?
-2. Prefer waiting for App Service quota, or migrate to **Container Apps** now (needs a Dockerfile)?
-3. Long-term, should we set up OIDC via an admin (removes stored publish-profile secrets)?
-4. Any values for the optional `ANTHROPIC_API_KEY` / `TAVILY_API_KEY` per environment?
+1. **Entra admin** to create the two EasyAuth app registrations (see EasyAuth section) — who owns the ticket?
+2. Long-term, should we set up OIDC via an admin (removes stored publish-profile secrets)?
+3. Any values for the optional `ANTHROPIC_API_KEY` / `TAVILY_API_KEY` per environment?
+4. Should the Drawing Agent (`drawing-agent/`) get its own hosting later, or stay offline?
