@@ -19,6 +19,7 @@ Outputs: Product Matching (sheet 15), Draft BOQ (sheet 16) and Missing Info
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -56,6 +57,304 @@ def _load_step1(step1_path: Path) -> dict:
 # default.  They are preserved in drawing_asset_list for engineer review, and
 # a MissingInfoQuestion is raised when all counted assets are in these states.
 _EXCLUDED_SCOPE_STATUSES = {"Future", "Provision"}
+
+
+# --------------------------------------------------------------------------- #
+# User scope-exclusion filter
+# --------------------------------------------------------------------------- #
+# Free-text project context (e.g. "do not include trainings, service etc. in
+# current draft scope") lets the engineer drop whole auto-added CATEGORIES from
+# the draft BOQ. These service / training / spares / commissioning lines are
+# added deterministically (base BOQ + MEA expansion) and are NOT scenario-
+# driven, so the Step 1 LLM prompt cannot remove them — they are filtered here,
+# where the BOQ lines actually exist. The user_context is carried in the Step 1
+# output JSON, so no extra plumbing from the web layer is required.
+_EXCLUSION_CUES = (
+    "do not include", "don't include", "dont include", "do not add",
+    "exclude", "excluding", "without", "omit", "drop ", "remove ",
+    "not in scope", "out of scope", "not required", "no need",
+)
+# category -> (trigger words in the user's text, family ids to drop,
+#              model/description substring hints to drop)
+_SCOPE_CATEGORIES = {
+    "service": {
+        "triggers": ("service", "services"),
+        "families": {"PF_SERVICES", "PF_COMMON"},
+        # NOTE: no bare "service" substring here — it false-matches software whose
+        # description happens to contain the word (e.g. "3yr subscription service").
+        # The PF_SERVICES / PF_COMMON family match covers the real service lines.
+        "hints": (
+            "commissioning", "mobilis", "factory fat", "factory acceptance",
+            "testing & commissioning", "energisation", "cybersecurity",
+            "communication establishment",
+        ),
+    },
+    "training": {"triggers": ("training", "trainings"), "families": set(),
+                 "hints": ("training",)},
+    "commissioning": {"triggers": ("commissioning",), "families": set(),
+                      "hints": ("commissioning", "mobilis")},
+    "spares": {"triggers": ("spare", "spares"), "families": set(),
+               "hints": ("spare",)},
+    "fat": {"triggers": ("fat", "factory acceptance"), "families": set(),
+            "hints": ("factory fat", "factory acceptance")},
+    "software": {"triggers": ("software", "licence", "license"),
+                 "families": {"PF_SW_LIC"},
+                 "hints": ("antivirus", "whitelisting", "backup software", "espdc")},
+    "network": {"triggers": ("network", "switch", "firewall"),
+                "families": {"PF_NET_SEC"}, "hints": ("l2 switch", "l3 switch", "firewall")},
+    "timing": {"triggers": ("gps", "timing"), "families": {"PF_TIMING"},
+               "hints": ("gps antenna", "gps splitter")},
+    "panel": {"triggers": ("panel", "cubicle", "cabinet"),
+              "families": {"PF_MON_PANEL"}, "hints": ("cubicle", "fms panel")},
+}
+
+
+def _parse_scope_exclusions(user_context: str) -> set[str]:
+    """Return the set of BOQ categories the user asked to exclude.
+
+    Requires BOTH an exclusion cue (e.g. "do not include", "exclude",
+    "without") and a category trigger word (e.g. "training", "service") to be
+    present in the context text, so ordinary mentions don't trigger a drop.
+    """
+    text = (user_context or "").lower()
+    if not text or not any(cue in text for cue in _EXCLUSION_CUES):
+        return set()
+    excluded: set[str] = set()
+    for category, spec in _SCOPE_CATEGORIES.items():
+        if any(trig in text for trig in spec["triggers"]):
+            excluded.add(category)
+    return excluded
+
+
+def _line_in_excluded_category(line: BOQLine, categories: set[str]) -> bool:
+    fid = (line.family_id or "") if hasattr(line, "family_id") else ""
+    blob = " ".join([
+        getattr(line, "product_model", "") or "",
+        getattr(line, "product_description", "") or "",
+        getattr(line, "quantity_basis", "") or "",
+    ]).lower()
+    for category in categories:
+        spec = _SCOPE_CATEGORIES[category]
+        if fid and fid in spec["families"]:
+            return True
+        if any(hint in blob for hint in spec["hints"]):
+            return True
+    return False
+
+
+def _apply_scope_exclusions(
+    boq: list[BOQLine], excluded_categories: set[str]
+) -> list[dict]:
+    """Drop BOQ lines matching excluded categories; return the dropped lines.
+
+    Mutates ``boq`` in place and renumbers the surviving lines.
+    """
+    if not excluded_categories:
+        return []
+    dropped: list[dict] = []
+    kept: list[BOQLine] = []
+    for line in boq:
+        if _line_in_excluded_category(line, excluded_categories):
+            dropped.append({
+                "product_model": line.product_model,
+                "product_description": line.product_description,
+                "family_id": getattr(line, "family_id", ""),
+            })
+        else:
+            kept.append(line)
+    if dropped:
+        boq[:] = kept
+        for i, line in enumerate(boq, start=1):
+            line.boq_line = i
+    return dropped
+
+
+def _exclusion_spec_from_directives(directives: list[dict]) -> tuple[set, set, set]:
+    """Return (categories, family_ids, scenario_ids) from ``exclude`` directives."""
+    cats, fams, scens = set(), set(), set()
+    for d in directives or []:
+        if d.get("type") != "exclude":
+            continue
+        if d.get("category"):
+            cats.add(d["category"])
+        if d.get("family_id"):
+            fams.add(d["family_id"])
+        if d.get("scenario_id"):
+            scens.add(d["scenario_id"])
+    return cats, fams, scens
+
+
+def _apply_context_exclusions(
+    boq: list[BOQLine], directives: list[dict], dp: DataPackage, fallback_context: str
+) -> tuple[list[dict], dict]:
+    """Drop BOQ lines per structured exclude directives (or, when none are
+    available, a deterministic keyword parse of the raw context).
+
+    Matching is by: excluded category (family set + description hints), excluded
+    family_id (resolved via the line's product), or excluded scenario_id.
+    Returns (dropped_lines, applied_summary).
+    """
+    cats, fam_ids, scen_ids = _exclusion_spec_from_directives(directives)
+    used_fallback = False
+    if not (cats or fam_ids or scen_ids):
+        cats = _parse_scope_exclusions(fallback_context)
+        used_fallback = bool(cats)
+    if not (cats or fam_ids or scen_ids):
+        return [], {}
+
+    # Expand category-mapped families into the family exclusion set.
+    fam_all = set(fam_ids)
+    for c in cats:
+        fam_all |= _SCOPE_CATEGORIES.get(c, {}).get("families", set())
+
+    dropped: list[dict] = []
+    kept: list[BOQLine] = []
+    for line in boq:
+        prod = dp.products.get(getattr(line, "product_id", "") or "")
+        fid = prod.family_id if prod else ""
+        drop = False
+        if fid and fid in fam_all:
+            drop = True
+        elif line.scenario_id and line.scenario_id in scen_ids:
+            drop = True
+        elif cats and _line_in_excluded_category(line, cats):
+            drop = True
+        if drop:
+            dropped.append({"product_model": line.product_model,
+                            "product_description": line.product_description,
+                            "family_id": fid})
+        else:
+            kept.append(line)
+    if dropped:
+        boq[:] = kept
+        for i, line in enumerate(boq, start=1):
+            line.boq_line = i
+    summary = {
+        "categories": sorted(cats), "family_ids": sorted(fam_ids),
+        "scenario_ids": sorted(scen_ids),
+        "source": "keyword-fallback" if used_fallback else "llm-directives",
+        "lines": len(dropped),
+    }
+    return dropped, summary
+
+
+def _apply_quantity_hints(
+    asset_counts: dict, directives: list[dict], dp: DataPackage
+) -> list[dict]:
+    """Seed/override drawing asset counts from user ``quantity_hint`` directives.
+
+    A hint maps to a drawing asset type either directly (``asset_type``) or via a
+    ``count_field`` (using ``COUNT_FIELD_TO_ASSET_TYPE``). The user-stated value
+    overrides the drawing-derived count so sizing reflects what the operator
+    explicitly provided. Returns the list of applied hints for transparency.
+    """
+    applied: list[dict] = []
+    for d in directives or []:
+        if d.get("type") != "quantity_hint":
+            continue
+        value = d.get("value") or 0
+        if not value:
+            continue
+        atypes: list[str] = []
+        if d.get("asset_type"):
+            atypes = [d["asset_type"]]
+        elif d.get("count_field"):
+            atypes = constants.COUNT_FIELD_TO_ASSET_TYPE.get(d["count_field"], [])
+        if not atypes:
+            continue
+        target = atypes[0]
+        asset_counts[target] = float(value)
+        applied.append({"asset_type": target, "value": float(value),
+                        "count_field": d.get("count_field", ""),
+                        "rationale": d.get("rationale", "")})
+    return applied
+
+
+def _leading_number(value) -> float | None:
+    """Parse the first integer/decimal out of a free-text value ('3 count' -> 3)."""
+    if value is None:
+        return None
+    m = re.search(r"\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(m.group()) if m else None
+
+
+def _seed_counts_from_requirements(
+    asset_counts: dict, requirements: list[dict], dp: DataPackage
+) -> list[dict]:
+    """Seed ``asset_counts`` from document-extracted 'Quantity Basis' requirements.
+
+    CBM / transformer projects usually have no SLD at the BOQ stage, so the only
+    count source is the tender / technical-spec text. Step 1 captures these as
+    "Quantity Basis" requirements (e.g. Asset Count = 3). Each is mapped to its
+    target drawing-asset type via the scenario's quantity-rule ``count_field``
+    and used to seed the count so Step 2 can size the BOQ without a drawing.
+    A real drawing-derived count (already present in ``asset_counts``) always
+    wins over text; among competing text values the largest is kept.
+    """
+    drawing_provided = set(asset_counts)
+    seeded: dict[str, dict] = {}
+    for r in requirements:
+        if (r.get("requirement_type") or "") != "Quantity Basis":
+            continue
+        val = _leading_number(r.get("parameter_value"))
+        if not val:
+            continue
+        rule = dp.quantity_rule_for_scenario(r.get("scenario_id", ""))
+        if not rule or not rule.count_field:
+            continue
+        atypes = constants.COUNT_FIELD_TO_ASSET_TYPE.get(rule.count_field, [])
+        if not atypes:
+            continue
+        target = atypes[0]
+        if target in drawing_provided:
+            continue  # a real drawing count wins over free text
+        if val > seeded.get(target, {}).get("value", 0):
+            seeded[target] = {
+                "asset_type": target, "value": float(val),
+                "scenario_id": r.get("scenario_id", ""),
+                "count_field": rule.count_field,
+                "metric": r.get("metric_name", ""),
+                "source": "document text (no drawing)",
+            }
+    for t, info in seeded.items():
+        asset_counts[t] = info["value"]
+    return list(seeded.values())
+
+
+# Transformer sub-families that are folded into the integrated QTMS system when
+# the CBM umbrella scenario (TR_CBM_001) is detected. Their scope is emitted as
+# the per-bank config template by ``expand_cbm_config`` instead of as separate
+# standalone family lines (avoids double-quoting; matches the real per-bank BOM).
+_CBM_FOLDED_FAMILIES = {
+    "PF_TR_TEMP", "PF_OLTC", "PF_AUX_SENSOR", "PF_BUSHING",
+    "PF_DGA", "PF_TR_PD", "PF_PD_TRANSFORMER",
+}
+
+# Per-transformer-bank CBM configuration template (from the CBM KB real cases -
+# the "融合配置后" 6U per-bank config). (product_id, qty_per_bank, group). The QTMS
+# base chassis itself is emitted by the PF_TR_CBM family line; this expands its
+# modules, sensors, DGA, bushing, PD and power-meter scope.
+_CBM_PER_BANK_TEMPLATE = [
+    ("GMB_QTMS_AI", 2, "QTMS module"),
+    ("CBM_RTD_PT100", 5, "QTMS analog sensor (RTD)"),
+    ("CBM_CLAMP_CT", 8, "QTMS analog sensor (CT: fan/pump/wind/OLTC)"),
+    ("CBM_TAP_INPUT", 1, "QTMS analog input (tap position)"),
+    ("GMB_QTMS_DI", 1, "QTMS module"),
+    ("GMB_QTMS_RO", 1, "QTMS module"),
+    ("GMB_QTMS_FO", 1, "QTMS module (fibre-optic)"),
+    ("CBM_FO_INTERNAL", 5, "Direct winding temperature"),
+    ("CBM_FO_EXTERNAL", 5, "Direct winding temperature"),
+    ("PROD_PDF_TWP_TANK_WALL_PLATE", 1, "Direct winding temperature"),
+    ("CBM_NXP611", 1, "Direct winding temperature"),
+    ("PROD_PF_DGA_03", 1, "DGA monitor (multi-gas, Serveron TM8)"),
+    ("CBM_TM_MOIST", 1, "DGA accessory"),
+    ("CBM_TM_ACCESS", 1, "DGA accessory"),
+    ("CBM_QBM_ADAPT", 3, "Bushing monitoring"),
+    ("CBM_QBM_TPCABLE", 3, "Bushing monitoring"),
+    ("DMS-QPDM-6", 1, "Partial discharge"),
+    ("DMS-CPL-IC44", 6, "Partial discharge (couplers)"),
+    ("CBM_POWER_METER", 2, "Power meter"),
+]
 
 
 def _asset_counts(drawing_assets: list[dict]) -> dict[str, float]:
@@ -217,7 +516,9 @@ def _calc_quantity(rule, asset_counts: dict[str, float]):
             return (
                 float(qty),
                 "set",
-                f"{rule.quantity_basis} (from drawing asset list: {atype}={int(qty)})",
+                # Source-neutral: the count may come from the drawing asset list
+                # OR (for no-SLD CBM projects) from the tender/spec text.
+                f"{rule.quantity_basis} (asset count: {atype}={int(qty)})",
                 rule.assumption,
                 True,
             )
@@ -238,6 +539,36 @@ _PARAM_WEIGHT = {"Must-have": 3.0, "Preferred": 1.0, "Quantity Basis": 1.0,
                  "Reference": 0.5}
 # Commercial safety default: prefer a validated model over an unverified one.
 _STATUS_RANK = {"verified": 0, "candidate": 1}
+
+# Model-name hints that indicate a SOFTWARE / master-station product (which must
+# never be sized per-DAU as if it were recorder hardware).
+_SOFTWARE_MODEL_HINTS = (
+    "iq+", "tmview", "master station", "software", "antivirus",
+    "whitelisting", "backup", "espdc",
+)
+
+
+def _is_software_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(h in m for h in _SOFTWARE_MODEL_HINTS)
+
+
+def _unit_for(family_id: str, family_name: str, model: str) -> str:
+    """Category-aware BOQ unit (instead of a blanket 'set').
+
+    - Services            -> 'lot'   (day-rate / scope; days confirmed by engineer)
+    - Software / licences  -> 'license'
+    - Everything else (DAU hardware, panels, network, timing, accessories) -> 'ea'
+    """
+    fid = family_id or ""
+    fn = (family_name or "").lower()
+    m = (model or "").lower()
+    if fid == "PF_SERVICES" or "service" in fn:
+        return "lot"
+    if (fid == "PF_SW_LIC" or "software" in fn or "platform" in fn
+            or "licen" in fn or "licen" in m):
+        return "license"
+    return "ea"
 
 
 def _score_product(product, scenario_reqs: list[dict], dp: DataPackage) -> dict:
@@ -338,6 +669,11 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
             fam_to_scenarios.setdefault(family.family_id, []).append(det)
 
     for family_id, dets in fam_to_scenarios.items():
+        # Accessory / panel / network / timing / software / service families are
+        # produced by the MEA expansion pass (quantified by the ruleset), not by
+        # this generic per-family matcher — skip them here to avoid duplicates.
+        if family_id in constants.EXPANSION_FAMILY_IDS:
+            continue
         family = dp.families[family_id]
         best_det = dets[0]
         sid = best_det["scenario_id"]
@@ -348,6 +684,20 @@ def match_products(detected: list[dict], requirements: list[dict], dp: DataPacka
         # Score every model in the family and pick the best fit (replaces the
         # previous "take products[0]" behaviour).
         products = dp.products_for_family(family_id)
+        # A recorder / DAU-sized family must be quoted as real DAU hardware
+        # (IDM+ / Informa), never as software. A data-package artifact lists
+        # iQ+ (master-station software) under the DFR family, which — sized by
+        # the per-DAU formula — produced a bogus "iQ+ x14" line. Drop software
+        # models from DAU-sized families when hardware alternatives exist.
+        fam_rule = dp.quantity_rules.get(family.default_quantity_rule_id)
+        is_dau_family = bool(
+            fam_rule and (fam_rule.count_field or "").lower()
+            in constants.DAU_SIZED_COUNT_FIELDS
+        )
+        if is_dau_family:
+            hardware = [p for p in products if not _is_software_model(p.model)]
+            if hardware:
+                products = hardware
         best = _select_best_product(products, scenario_reqs, dp)
         product = best["product"] if best else None
         pid = product.product_id if product else f"{family_id}_TBD"
@@ -510,9 +860,20 @@ def _evaluate_rule(rule, sid, scenario_reqs, asset_counts, scenario):
 # --------------------------------------------------------------------------- #
 def generate_boq(detected: list[dict], matches: list[ProductMatch],
                  asset_counts: dict[str, float], compat_flags: list[dict],
-                 dp: DataPackage, project_id: str) -> tuple[list[BOQLine], dict, list[dict]]:
+                 dp: DataPackage, project_id: str,
+                 fold_families: set[str] | None = None) -> tuple[list[BOQLine], dict, list[dict]]:
     boq: list[BOQLine] = []
     quantity_gaps: list[dict] = []
+
+    # Families to suppress as standalone lines.
+    #  * ``fold_families``: folded into an integrated system (e.g. CBM QTMS) and
+    #    emitted by a dedicated expansion pass instead.
+    #  * PD de-duplication: when the QPDM family (PF_TR_PD) is matched for the
+    #    same transformer-PD need, drop the legacy PF_PD_TRANSFORMER line.
+    skip_families: set[str] = set(fold_families or set())
+    matched_families = {m.family_id for m in matches}
+    if "PF_TR_PD" in matched_families and "PF_PD_TRANSFORMER" in matched_families:
+        skip_families.add("PF_PD_TRANSFORMER")
 
     # High-severity triggered guardrails per scenario block the line to review.
     blocked: dict[str, list[str]] = {}
@@ -522,6 +883,8 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
 
     line_no = 0
     for match in matches:
+        if match.family_id in skip_families:
+            continue
         scenario_id = _scenario_for_family(match.family_id, detected, dp)
         rule = dp.quantity_rules.get(_quantity_rule_id(match.family_id, scenario_id, dp))
         qty, unit, basis, assumption, derivable = _calc_quantity(rule, asset_counts)
@@ -537,6 +900,16 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
         review_status = "Needs Review" if (blockers or not derivable
                                            or match.match_status != "Recommended") else "Draft"
         notes = []
+        # An in-scope family whose count could not be derived must not read as a
+        # real "0" (that looks like "not required" and silently drops the line's
+        # value, e.g. the SF6 GDM sensor count). Flag it explicitly as TBD so a
+        # reviewer fills the quantity; the paired clarification question carries
+        # the ask.
+        if not derivable and not qty:
+            notes.append(
+                "QUANTITY TBD — not derivable from the documents/drawings provided; "
+                "confirm count before quoting (do not treat as zero)."
+            )
         if blockers:
             notes.append("Guardrails: " + ", ".join(sorted(set(blockers))))
         if match.gap_or_risk:
@@ -552,7 +925,7 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
             scenario_id=scenario_id,
             related_assets=_related_assets(scenario_id, asset_counts),
             quantity=qty,
-            unit=unit,
+            unit=_unit_for(match.family_id, match.family_name, match.candidate_model),
             quantity_basis=basis,
             assumption=assumption,
             confidence=match.match_score,
@@ -566,6 +939,221 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
         "lines_draft_ready": sum(1 for b in boq if b.review_status == "Draft"),
     }
     return boq, summary, quantity_gaps
+
+
+def _find_kb_product(dp: DataPackage, family_id: str, keyword: str):
+    """First product in a family whose model/description contains ``keyword``."""
+    kw = keyword.lower()
+    for p in dp.products_for_family(family_id):
+        blob = f"{p.model} {p.description}".lower()
+        if kw in blob:
+            return p
+    return None
+
+
+def expand_mea_config(boq: list[BOQLine], detected: list[dict], dp: DataPackage,
+                      project_id: str) -> list[BOQLine]:
+    """Append accessories / panels / software / services per the TAQA MEA ruleset.
+
+    Runs after the base (recorder) BOQ. When recorder/DAU scope is present it
+    sizes and adds the packaging the real engineered BOQ carries — GPS timing,
+    test switches, EPG licences, network switches, field panels, LEV/PDC cabinet
+    contents and services — using the ratios in ``constants`` (sourced from the
+    CR_MEA_* rules) and product models from the reverse-populated KB families.
+    """
+    import math
+
+    rec_lines = [b for b in boq if b.scenario_id in constants.RECORDER_SCENARIO_IDS]
+    if not rec_lines:
+        return []  # no recorder scope -> nothing to package
+
+    det_ids = {d["scenario_id"] for d in detected}
+    has_pmu_wams = bool({"PMU_001", "WAMS_001"} & det_ids)
+    has_pmu = "PMU_001" in det_ids
+    # DAU proxy: one physical recorder per monitored bay ~= the largest single
+    # recorder line quantity (summing functions would triple-count the same bay).
+    n_dau = max((int(b.quantity or 0) for b in rec_lines), default=0)
+    if n_dau <= 0:
+        n_dau = 1
+    pmu_qty = max((int(b.quantity or 0) for b in rec_lines
+                   if b.scenario_id == "PMU_001"), default=0)
+    n_masters = math.ceil(n_dau / constants.MEA_DAUS_PER_GPS_MASTER) if has_pmu_wams else 0
+    n_panels = max(1, math.ceil(n_dau / constants.MEA_DEVICES_PER_PANEL))
+
+    # (family_id, model keyword, quantity, scenario_id, basis / rule)
+    specs: list[tuple] = [
+        ("PF_PANEL_ACC", "test", n_dau, "FMS_001",
+         f"Test switch per device (CR_MEA_09): {n_dau} DAU"),
+        ("PF_NET_SEC", "l2 switch", n_panels, "COMM_SCADA_001",
+         f"Managed L2 switch per panel (CR_MEA_07): {n_panels} panel(s)"),
+        ("PF_NET_SEC", "l3 switch", n_panels, "COMM_SCADA_001",
+         f"Managed L3 switch per panel (CR_MEA_07): {n_panels} panel(s)"),
+        ("PF_NET_SEC", "firewall", 2, "COMM_SCADA_001",
+         "Firewall(s) for the monitoring LAN / OETC link (CR_MEA_11)"),
+        ("PF_MON_PANEL", "fms panel", n_panels, "FMS_001",
+         f"Field panel per ~{constants.MEA_DEVICES_PER_PANEL} DAU (CR_MEA_05): {n_panels} panel(s)"),
+    ]
+    if has_pmu_wams and n_masters:
+        specs.append(
+            ("PF_TIMING", "antenna", n_masters * constants.MEA_ANTENNAS_PER_MASTER,
+             "PMU_001", f"{constants.MEA_ANTENNAS_PER_MASTER} antennas per GPS master (CR_MEA_06)"))
+        # GPS 2-Way splitter: omitted by default (DAY-2 feedback: not required).
+        if constants.MEA_INCLUDE_GPS_SPLITTER:
+            specs.append(
+                ("PF_TIMING", "splitter", n_masters, "PMU_001",
+                 f"GPS splitter per master; 1 master / {constants.MEA_DAUS_PER_GPS_MASTER} DAU (CR_MEA_06)"))
+    if has_pmu and pmu_qty:
+        specs.append(
+            ("PF_SW_LIC", "epg pmu", constants.MEA_EPG_LICENSES_PER_PMU * pmu_qty,
+             "PMU_001", f"{constants.MEA_EPG_LICENSES_PER_PMU} EPG licences per PMU device (CR_MEA_08): {pmu_qty} device(s)"))
+
+    # LEV cabinet + standard contents (one per system) — CR_MEA_11.
+    lev_items = [
+        ("PF_MON_PANEL", "lev cubicle", 1, "LEV cabinet (as per Transco spec)"),
+        ("PF_MON_PANEL", "industrial rack", 1, "Industrial rack-mounted PC"),
+        ("PF_SW_LIC", "iq+", 1, "iQ+ master-station software (1 per system)"),
+        ("PF_SW_LIC", "trend micro", 1, "Trend Micro antivirus"),
+        ("PF_SW_LIC", "trellix", 1, "Trellix whitelisting"),
+        ("PF_SW_LIC", "acronis", 1, "Acronis backup"),
+        ("PF_MON_PANEL", "monitor", 1, "Monitor & keyboard"),
+        ("PF_MON_PANEL", "printer", 1, "Printer"),
+        ("PF_MON_PANEL", "annunciator", 1, "Alarm annunciator"),
+    ]
+    for fid, kw, qty, basis in lev_items:
+        specs.append((fid, kw, qty, "COMM_SCADA_001", basis + " (CR_MEA_11)"))
+    # PDC cabinet extras (only when PMU/WAMS present) — CR_MEA_12.
+    if has_pmu_wams:
+        for fid, kw, basis in [
+            ("PF_MON_PANEL", "pdc cubicle", "PDC cabinet (as per Transco spec)"),
+            ("PF_SW_LIC", "espdc", "eSPDC phasor data concentrator software"),
+            ("PF_MON_PANEL", "kvm", "KVM switch"),
+        ]:
+            specs.append((fid, kw, 1, "PMU_001", basis + " (CR_MEA_12)"))
+
+    # Services & spares: omitted from the priced draft by default (DAY-2
+    # feedback — they belong in the General notes, not as BOQ line items).
+    if constants.MEA_INCLUDE_SERVICES:
+        for p in dp.products_for_family("PF_SERVICES"):
+            specs.append(("PF_SERVICES", p.model.lower()[:12], 1, "COMM_SCADA_001",
+                          "Engineering / commissioning service (day-rate; QR_SERVICES_001)"))
+
+    extra: list[BOQLine] = []
+    line_no = max((b.boq_line for b in boq), default=0)
+    seen: set = set()
+    for fid, kw, qty, sid, basis in specs:
+        prod = _find_kb_product(dp, fid, kw)
+        if not prod or (prod.product_id in seen):
+            continue
+        seen.add(prod.product_id)
+        line_no += 1
+        extra.append(BOQLine(
+            boq_line=line_no, project_id=project_id,
+            product_id=prod.product_id, product_model=prod.model,
+            product_description=prod.description or prod.family_name,
+            scenario_id=sid, related_assets=f"DAU count={n_dau}",
+            quantity=float(qty),
+            unit=_unit_for(prod.family_id, prod.family_name, prod.model),
+            quantity_basis=f"MEA ruleset — {basis}",
+            assumption="Auto-added by TAQA MEA config expansion; confirm quantities.",
+            confidence=0.55, review_status="Needs Review",
+            notes="Added by MEA ruleset expansion (CR_MEA_*).",
+        ))
+    return extra
+
+
+def _dga_model_for_count(requirements: list[dict]) -> tuple[str, str]:
+    """Pick the Serveron DGA model from the extracted DGA gas count.
+
+    TM8 (8-9 gas) / TM3 (3 gas) / TM1 (H2 only). Defaults to multi-gas TM8 for a
+    main-transformer online DGA when the count is unknown. Returns (product_id,
+    rationale).
+    """
+    n = None
+    for r in requirements:
+        if r.get("metric_id") == "MET_DGA_GAS_COUNT":
+            n = _leading_number(r.get("parameter_value"))
+            break
+    if n is None:
+        return "PROD_PF_DGA_03", "gas count not stated; default multi-gas TM8"
+    if n <= 1:
+        return "PROD_PF_DGA_01", f"{int(n)}-gas (H2) -> TM1"
+    if n <= 3:
+        return "PROD_PF_DGA_02", f"{int(n)}-gas -> TM3"
+    return "PROD_PF_DGA_03", f"{int(n)}-gas -> TM8"
+
+
+def expand_cbm_config(boq: list[BOQLine], detected: list[dict],
+                      asset_counts: dict[str, float], dp: DataPackage,
+                      project_id: str,
+                      requirements: list[dict] | None = None) -> list[BOQLine]:
+    """Expand the integrated transformer CBM system into its per-bank BOM.
+
+    Triggered when the CBM umbrella scenario (TR_CBM_001) is detected. The
+    PF_TR_CBM family line provides the QTMS base chassis; this pass adds the
+    per-transformer-bank modules, sensors, DGA (multi-gas), bushing, PD and
+    power-meter scope from the CBM KB template, scaled by the transformer count.
+    Because CBM projects rarely give exact per-parameter counts at BOQ, the
+    template is emitted as a clearly-flagged assumption so the BOQ is quotable
+    rather than all-zero — the engineer trims/edits against the tender.
+    """
+    det_ids = {d["scenario_id"] for d in detected}
+    if "TR_CBM_001" not in det_ids:
+        return []
+
+    n_tx = int(asset_counts.get("Transformer", 0))
+    assumed = n_tx <= 0
+    if assumed:
+        n_tx = 1
+
+    base_note = (
+        "Per-transformer-bank CBM template (from CBM KB real cases, 6U config); "
+        "qty = per-bank x N transformers. Confirm against the tender's "
+        "monitored-parameter list (temperature/analog/RTD/CT/tap/DGA/bushing/PD)."
+    )
+    tx_note = ("Transformer count assumed = 1 (not stated in documents) - CONFIRM. "
+               if assumed else "")
+
+    # Keep the QTMS base (PF_TR_CBM) header line consistent with the per-bank
+    # expansion: if its quantity is still TBD/0, apply the same (possibly
+    # assumed) transformer count so header and modules agree.
+    for b in boq:
+        if (b.scenario_id == "TR_CBM_001"
+                and b.product_id in ("CBM_QTMS_BASE_6U", "CBM_QTMS_BASE_3U")
+                and (b.quantity or 0) == 0):
+            b.quantity = float(n_tx)
+            b.quantity_basis = (f"Transformer bank count = {n_tx}"
+                                + (" (assumed - confirm)" if assumed else ""))
+            if tx_note and "assumed" not in (b.assumption or "").lower():
+                b.assumption = (tx_note + (b.assumption or "")).strip()
+
+    # Choose the DGA model from the extracted gas count (default multi-gas TM8).
+    dga_pid, dga_reason = _dga_model_for_count(requirements or [])
+
+    out: list[BOQLine] = []
+    line_no = max((b.boq_line for b in boq), default=0)
+    for pid, per_bank, group in _CBM_PER_BANK_TEMPLATE:
+        # Substitute the placeholder DGA model with the gas-count-driven choice.
+        if pid == "PROD_PF_DGA_03":
+            pid = dga_pid
+            group = f"DGA monitor ({dga_reason})"
+        prod = dp.products.get(pid)
+        if not prod:
+            continue
+        line_no += 1
+        out.append(BOQLine(
+            boq_line=line_no, project_id=project_id,
+            product_id=prod.product_id, product_model=prod.model,
+            product_description=prod.description or prod.family_name,
+            scenario_id="TR_CBM_001",
+            related_assets=f"Transformer={n_tx}",
+            quantity=float(per_bank * n_tx),
+            unit=_unit_for(prod.family_id, prod.family_name, prod.model),
+            quantity_basis=f"{per_bank} per transformer bank x {n_tx} transformer(s) [{group}]",
+            assumption=tx_note + base_note,
+            confidence=0.6, review_status="Needs Review",
+            notes="Added by CBM per-bank config expansion (QR_TR_CBM_*).",
+        ))
+    return out
 
 
 def _scenario_for_family(family_id: str, detected: list[dict], dp: DataPackage) -> str:
@@ -596,7 +1184,9 @@ def _related_assets(scenario_id: str, asset_counts: dict[str, float]) -> str:
 # --------------------------------------------------------------------------- #
 def generate_missing_info(detected: list[dict], requirements: list[dict],
                           compat_flags: list[dict], quantity_gaps: list[dict],
-                          dp: DataPackage, project_id: str) -> list[MissingInfoQuestion]:
+                          dp: DataPackage, project_id: str,
+                          asset_counts: dict[str, float] | None = None) -> list[MissingInfoQuestion]:
+    asset_counts = asset_counts or {}
     questions: list[MissingInfoQuestion] = []
     seen: set[tuple[str, str]] = set()
     review_thr = config.SETTINGS.thresholds.review_confidence
@@ -624,12 +1214,18 @@ def generate_missing_info(detected: list[dict], requirements: list[dict],
 
     # 0b. Quantity that could not be derived from the drawing/asset list.
     for gap in quantity_gaps:
+        scenario = dp.scenarios.get(gap["scenario_id"])
+        # CBM / transformer projects have no SLD at BOQ: ask for the count from
+        # the tender parameter list rather than a drawing.
+        no_drawing = bool(scenario) and "none at boq" in (scenario.drawing_dependency or "").lower()
+        source_hint = ("from the tender / technical-spec parameter list"
+                       if no_drawing else "e.g. from SLD / equipment list")
         add(MissingInfoQuestion(
             scenario_id=gap["scenario_id"],
             missing_item=f"Quantity basis: {gap['count_field']}",
             why_it_matters=f"Needed to size BOQ quantity for {gap['family_name']}.",
             question=(f"Please provide the {gap['count_field'].replace('_', ' ')} "
-                      f"(e.g. from SLD / equipment list) for {gap['family_name']}."),
+                      f"({source_hint}) for {gap['family_name']}."),
             priority="High", owner="Sales / Customer", status="Open",
             notes="Quantity not derivable from current drawing asset list.",
         ))
@@ -642,6 +1238,15 @@ def generate_missing_info(detected: list[dict], requirements: list[dict],
         if req["requirement_type"] not in ("Must-have", "Quantity Basis"):
             continue
         sid = req["scenario_id"]
+        # Skip quantity-basis asks whose count is already resolved in asset_counts
+        # (from a drawing OR document-seeded text count). Avoids re-asking for a
+        # transformer/asset count that Step 2 has already derived.
+        if req["requirement_type"] == "Quantity Basis":
+            rule = dp.quantity_rule_for_scenario(sid)
+            atypes = (constants.COUNT_FIELD_TO_ASSET_TYPE.get(rule.count_field, [])
+                      if rule else [])
+            if any(a in asset_counts for a in atypes):
+                continue
         template = _best_template(dp.missing_info_for_scenario(sid), req["metric_name"])
         if template:
             add(MissingInfoQuestion(
@@ -679,11 +1284,26 @@ def generate_missing_info(detected: list[dict], requirements: list[dict],
     return questions
 
 
+# Generic tokens that must not, on their own, match a requirement to a template
+# (e.g. "count" would wrongly link the transformer "Asset Count" requirement to
+# the "DGA gas count required" template).
+_GENERIC_TEMPLATE_TOKENS = {
+    "count", "number", "level", "type", "value", "rating", "class", "list",
+    "point", "points",
+}
+
+
 def _best_template(templates: list[MissingInfoQuestion], metric_name: str):
     metric_low = metric_name.lower()
+    tokens = [t for t in metric_low.split() if len(t) > 3]
     for tpl in templates:
         item = tpl.missing_item.lower()
-        if any(tok in item for tok in metric_low.split() if len(tok) > 3):
+        # Strong match: the full metric name appears in the template item.
+        if metric_low and metric_low in item:
+            return tpl
+        # Otherwise require a distinctive (non-generic) shared token.
+        if any(tok in item for tok in tokens
+               if tok not in _GENERIC_TEMPLATE_TOKENS):
             return tpl
     return None
 
@@ -751,7 +1371,17 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     detected = step1["detected_scenarios"]
     requirements = step1["structured_requirements"]
     drawing_assets = step1["drawing_asset_list"]
+    directives = step1.get("context_directives", []) or []
     asset_counts = _asset_counts(drawing_assets)
+
+    # User-provided quantity hints (e.g. "6 feeders", "273 gas zones") override
+    # the drawing-derived counts before sizing.
+    applied_hints = _apply_quantity_hints(asset_counts, directives, dp)
+
+    # Seed counts from document-extracted "Quantity Basis" requirements so
+    # CBM / no-drawing projects can be sized from the tender text (drawing counts
+    # still win). This is what lets an extracted "3 transformers" reach the BOQ.
+    seeded_counts = _seed_counts_from_requirements(asset_counts, requirements, dp)
 
     matches = match_products(detected, requirements, dp, project_id)
     compat_flags = apply_compatibility(detected, requirements, asset_counts, dp)
@@ -765,11 +1395,69 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
             matches, detected, dp, client, project_summary
         ) or llm_used
 
+    # When the integrated CBM scenario is present, fold the transformer
+    # sub-families into the QTMS system (emitted as a per-bank template below)
+    # so they are not also quoted as standalone lines.
+    detected_ids = {d["scenario_id"] for d in detected}
+    fold_families = set(_CBM_FOLDED_FAMILIES) if "TR_CBM_001" in detected_ids else set()
+    # Recorder / FMS substation scope: the master-station software (iQ+) and any
+    # gateway are supplied via the MEA packaging expansion below, so drop the
+    # generic monitoring-software / gateway family lines to avoid the duplicate
+    # "not required" entries the users flagged (DAY-2 feedback 775368 / 776060).
+    if detected_ids & constants.RECORDER_SCENARIO_IDS:
+        fold_families |= {"PF_SOFTWARE", "PF_GATEWAY"}
+
     boq, boq_summary, quantity_gaps = generate_boq(
-        detected, matches, asset_counts, compat_flags, dp, project_id
+        detected, matches, asset_counts, compat_flags, dp, project_id, fold_families
     )
+    # CBM per-transformer-bank config expansion: turn the integrated QTMS system
+    # into its module / sensor / DGA / bushing / PD / power-meter BOM.
+    cbm_lines = expand_cbm_config(boq, detected, asset_counts, dp, project_id,
+                                  requirements)
+    if cbm_lines:
+        boq.extend(cbm_lines)
+        boq_summary["total_lines"] = len(boq)
+        boq_summary["lines_needing_review"] = sum(
+            1 for b in boq if b.review_status == "Needs Review"
+        )
+        boq_summary["cbm_expansion_lines"] = len(cbm_lines)
+    if seeded_counts:
+        boq_summary["counts_seeded_from_documents"] = seeded_counts
+
+    # TAQA MEA ruleset expansion: add accessories / panels / software / services
+    # (GPS, switches, EPG licences, test switches, LEV/PDC cabinet BoM, services)
+    # sized from the recorder scope so the BOQ reflects the engineered package.
+    mea_lines = expand_mea_config(boq, detected, dp, project_id)
+    if mea_lines:
+        boq.extend(mea_lines)
+        boq_summary["total_lines"] = len(boq)
+        boq_summary["lines_needing_review"] = sum(
+            1 for b in boq if b.review_status == "Needs Review"
+        )
+        boq_summary["mea_expansion_lines"] = len(mea_lines)
+
+    # Apply the user's scope exclusions to the fully assembled BOQ. Uses the
+    # structured directives interpreted in Step 1 (exclude by category / family /
+    # scenario); falls back to a deterministic keyword parse of the raw context
+    # when the LLM was unavailable. These service / training / spares lines are
+    # added deterministically above (not by the Step 1 prompt), so this is the
+    # only place they can be removed.
+    scope_dropped, scope_summary = _apply_context_exclusions(
+        boq, directives, dp, step1.get("user_context", "")
+    )
+    if applied_hints:
+        boq_summary["quantity_hints_applied"] = applied_hints
+    if scope_dropped:
+        boq_summary["total_lines"] = len(boq)
+        boq_summary["lines_needing_review"] = sum(
+            1 for b in boq if b.review_status == "Needs Review"
+        )
+        boq_summary["scope_excluded"] = scope_summary
+        boq_summary["scope_excluded_detail"] = scope_dropped
+
     missing = generate_missing_info(
-        detected, requirements, compat_flags, quantity_gaps, dp, project_id
+        detected, requirements, compat_flags, quantity_gaps, dp, project_id,
+        asset_counts
     )
     # Add questions for Future/Provision assets that were excluded from counting.
     future_qs = _future_scope_questions(drawing_assets, asset_counts, dp, project_id)
@@ -808,8 +1496,37 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     # "Is information complete?" gate: complete = at least one BOQ line and no
     # High-priority customer/engineer clarification outstanding (product-
     # capability TBD is an internal validation step, not a customer-side gap).
-    high_open = [q for q in missing if q.priority == "High"]
     has_scope = len(boq) > 0
+
+    # Never return a silent empty result: when no scope was detected, surface an
+    # explicit High-priority clarification so the UI guides the user on what to
+    # provide (esp. when only an unreadable / scanned drawing was submitted).
+    if not has_scope:
+        docs = step1.get("documents", [])
+        drawing_docs = [d for d in docs if d.get("doc_type") == "Drawing / SLD"]
+        only_drawings = bool(drawing_docs) and len(drawing_docs) == len(docs)
+        if only_drawings:
+            gap_item = "Readable specification / equipment list (or a text-based SLD)"
+            why = ("Only drawing(s)/SLD were provided and no Qualitrol monitoring scope "
+                   "could be read from them — the drawing may be a scan with no text layer, "
+                   "or its labels were not legible to the drawing reader.")
+            question = ("Please provide the project Scope of Work / specification / equipment "
+                        "list, or a higher-resolution / text-based single-line diagram, so "
+                        "requirements and a BOQ can be generated.")
+        else:
+            gap_item = "Project specification / SLD / equipment list"
+            why = ("No Qualitrol-relevant monitoring scope was detected in the submitted "
+                   "documents.")
+            question = ("Please provide a project specification, single-line diagram, or "
+                        "equipment list describing the monitoring scope.")
+        missing.insert(0, MissingInfoQuestion(
+            project_id=project_id, scenario_id="", missing_item=gap_item,
+            why_it_matters=why, question=question, priority="High",
+            owner="Sales / Customer", status="Open",
+            notes="Auto-generated: no Qualitrol scope detected in the submission.",
+        ))
+
+    high_open = [q for q in missing if q.priority == "High"]
     information_complete = has_scope and not high_open
 
     if not has_scope:

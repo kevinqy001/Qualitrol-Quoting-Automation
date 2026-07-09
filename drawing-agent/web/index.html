@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qualitrol Drawing Agent</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">Q</div>
+      <div class="brand-text"><strong>Drawing Agent</strong><span>agentic take-off · standalone</span></div>
+    </div>
+    <div class="controls">
+      <label class="ctl"><span>Drawing</span><select id="drawingSelect"></select></label>
+      <button id="detectBtn" class="btn btn-primary">Run detection</button>
+      <button id="addBtn" class="btn" title="Draw a new box">+ Add box</button>
+      <span id="engineBadge" class="badge"></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left">
+      <h2>Components</h2>
+      <ul id="layers" class="layers"></ul>
+      <div class="review-summary">
+        <h3>Review progress</h3>
+        <div class="progress"><div id="progressBar"></div></div>
+        <div id="reviewCounts" class="muted small"></div>
+        <div class="row-actions">
+          <button id="acceptAllBtn" class="btn btn-ghost small">Accept all</button>
+          <button id="resetBtn" class="btn btn-ghost small">Reset</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="viewer-wrap">
+      <div class="viewer-head">
+        <div><strong id="drawingTitle">—</strong><span id="drawingProject" class="muted small"></span></div>
+        <div class="zoom-ctl">
+          <button class="btn btn-icon" id="zoomOut">−</button>
+          <span id="zoomLabel">100%</span>
+          <button class="btn btn-icon" id="zoomIn">+</button>
+          <button class="btn btn-ghost small" id="fitBtn">Fit</button>
+          <label class="small chk"><input type="checkbox" id="lblChk"> Labels</label>
+        </div>
+      </div>
+      <div id="viewer" class="viewer">
+        <div id="stage" class="stage">
+          <img id="drawing" alt="single line diagram" draggable="false" />
+          <svg id="overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="labels" class="labels"></div>
+        </div>
+        <div id="hint" class="hint hidden">Drag on the drawing to place a box</div>
+        <div id="loading" class="loading hidden"><div class="spinner"></div><span id="loadingMsg">Working…</span></div>
+      </div>
+    </section>
+
+    <aside class="panel right">
+      <div class="tabs">
+        <button class="tab active" data-tab="chat">Agent</button>
+        <button class="tab" data-tab="detections">Detections</button>
+        <button class="tab" data-tab="quote">Quote</button>
+      </div>
+
+      <!-- CHAT -->
+      <div id="tab-chat" class="tab-body chat-body">
+        <div id="chatLog" class="chat-log">
+          <div class="msg agent"><div class="bubble">Hi — I'm the drawing agent. Ask me to
+            <em>find</em> components, <em>accept/reject/delete</em> them, <em>re-run detection</em>
+            on a region, or <em>recompute the BOQ</em>. Try “find all transformer bays”.</div></div>
+        </div>
+        <div class="chat-input">
+          <input id="chatInput" type="text" placeholder="Message the agent…" autocomplete="off" />
+          <button id="chatSend" class="btn btn-primary">Send</button>
+        </div>
+      </div>
+
+      <!-- DETECTIONS -->
+      <div id="tab-detections" class="tab-body hidden">
+        <div id="editor" class="editor hidden">
+          <canvas id="evidenceCanvas" width="600" height="240"></canvas>
+          <div class="editor-fields">
+            <label>Label <input id="edLabel" type="text" /></label>
+            <label>Type
+              <select id="edType">
+                <option value="gis_bay">GIS Bay</option>
+                <option value="power_transformer">Power Transformer</option>
+                <option value="circuit_breaker">Circuit Breaker</option>
+                <option value="busbar">Busbar</option>
+              </select>
+            </label>
+            <div class="editor-actions">
+              <button id="edAccept" class="btn btn-ok small">✓ Accept</button>
+              <button id="edReject" class="btn small">✗ Reject</button>
+              <button id="edDelete" class="btn btn-danger small">Delete</button>
+            </div>
+          </div>
+        </div>
+        <div id="detectionList" class="det-list"></div>
+      </div>
+
+      <!-- QUOTE -->
+      <div id="tab-quote" class="tab-body hidden">
+        <div class="quote-head">
+          <h3>Derived Qualitrol BOQ</h3>
+          <p class="muted small">Live from <em>accepted</em> detections. Every quantity traces to a highlighted item.</p>
+        </div>
+        <div id="quoteBody"></div>
+        <div class="contrast" id="contrast"></div>
+        <a id="exportBtn" class="btn btn-primary full" href="#">Export BOQ (CSV)</a>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="statusText">Loading…</span><span class="grow"></span>
+    <span id="sessionText" class="muted small"></span>
+  </footer>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

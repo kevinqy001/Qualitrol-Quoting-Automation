@@ -28,6 +28,22 @@ Override per run with the env var `QUALITROL_STEP1_RULES_FILE`.
   (Modbus / DNP3 / IEC 61850) alone is communication scope, not software.
 - Communication protocols belong to `COMM_SCADA_001`; do not let them
   corroborate unrelated hardware scenarios.
+- SCOPE-EXCLUSION LANGUAGE wins: if the text says an item is "not part of the
+  scope", "out of scope", "optional", "future", "provision", a "capability to
+  expand", or is supplied by others, that item is NOT in scope now. Do not put
+  its scenario in scope on such evidence (e.g. a PD spec noting it "can expand
+  into a Breaker Condition Monitoring system … not part of the scope of this
+  description" does NOT put `BRK_HEALTH_001` in scope).
+- `BRK_HEALTH_001` (circuit breaker health monitoring) requires evidence that
+  the customer wants to MONITOR the breaker — trip/close-coil current, operating
+  / travel time, operation counter as a monitored signal, "breaker monitor" /
+  "CBM". Circuit breakers, disconnectors, earthing switches shown as GIS /
+  switchgear components (the plant being monitored) do NOT imply it.
+- `COMM_SCADA_001` and gateway/software families (`PF_GATEWAY`, `PF_SOFTWARE`)
+  are in scope only when a SEPARATE integration deliverable is required (a
+  standalone SCADA gateway, protocol converter, or asset platform). An
+  "IEC 61850 output" / "SCADA output" that is a bundled feature of a PD or SF6
+  monitoring system is NOT a separate communication product line.
 
 ## Requirement extraction
 

@@ -65,8 +65,11 @@ def _rows(ws) -> list[list]:
 def _find_header(rows: list[list], first_col: str) -> int:
     target = first_col.strip().lower()
     for idx, row in enumerate(rows):
-        if row and row[0] is not None and str(row[0]).strip().lower() == target:
-            return idx
+        if not row:
+            continue
+        for cell in row:
+            if cell is not None and str(cell).strip().lower() == target:
+                return idx
     raise ValueError(f"Header row starting with {first_col!r} not found")
 
 
@@ -197,6 +200,7 @@ class DataPackage:
                 continue
             self.families[fid] = ProductFamily(
                 family_id=fid,
+                product_line=_g(rec, "Product Line"),
                 family_name=_g(rec, "Product Family"),
                 applicable_scenarios=_split_list(_g(rec, "Applicable Scenario IDs")),
                 primary_asset_type=_g(rec, "Primary Asset Type"),

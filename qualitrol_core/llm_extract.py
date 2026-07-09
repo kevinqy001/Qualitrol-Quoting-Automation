@@ -86,11 +86,13 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
     ]
 
     # Group up to 3 evidence snippets per candidate scenario for grounding.
+    # Keep a wide snippet so scope-qualifying language around the keyword
+    # (e.g. "…is not part of the scope of this description") stays visible.
     snippets: dict[str, list[str]] = {}
     for ev in evidence:
         snippets.setdefault(ev.scenario_id, [])
         if len(snippets[ev.scenario_id]) < 3:
-            snippets[ev.scenario_id].append(ev.evidence_text[:160])
+            snippets[ev.scenario_id].append(ev.evidence_text[:300])
 
     candidates = [
         {"scenario_id": d["scenario_id"], "name": d["scenario"],
@@ -103,9 +105,24 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
         "You are a senior Qualitrol application engineer. You map customer power-"
         "grid monitoring documents (specs, emails, SLD/GIS drawings) to a CONTROLLED "
         "list of application scenarios. Be precise: only mark a scenario in scope if "
-        "the evidence genuinely supports it. Watch for false positives, e.g. mentions "
-        "of current/voltage transformers (CT/VT) in a switchgear drawing do NOT imply "
-        "power-transformer monitoring. Respond with STRICT JSON only."
+        "the evidence genuinely supports Qualitrol supplying that monitoring in THIS "
+        "project. Apply these precision rules and set in_scope=false (with a short "
+        "rationale) when they fire:\n"
+        "1. SCOPE-EXCLUSION LANGUAGE: if the evidence says the item is 'not part of "
+        "the scope', 'out of scope', 'optional', 'future', 'provision', a 'capability "
+        "to expand', or supplied by another party, it is NOT in scope now.\n"
+        "2. PLANT vs MONITORING: components of the switchgear/plant being monitored "
+        "are not themselves monitoring scope. Circuit breakers, disconnectors, "
+        "earthing switches, CTs/VTs, bushings described as GIS/switchgear parts do "
+        "NOT imply breaker condition monitoring, transformer monitoring, etc. Mark "
+        "breaker/transformer/etc. monitoring in scope only when the customer asks to "
+        "MONITOR that asset (e.g. trip/close-coil current, operating-time, DGA).\n"
+        "3. PROTOCOL vs PRODUCT: IEC 61850 / Modbus / DNP3 / SCADA mentioned as a "
+        "data-output or integration requirement OF a monitoring system is a bundled "
+        "output, NOT a standalone SCADA/gateway/software product line. Mark "
+        "communication-integration in scope only when a separate gateway / SCADA "
+        "integration / asset-platform deliverable is explicitly required.\n"
+        "Respond with STRICT JSON only."
     )
     system = _with_extra_rules(system, extra_instructions)
     user = (
@@ -138,6 +155,121 @@ def refine_scenarios(client, dp, evidence: list, detected: list[dict],
             "confidence": max(0.0, min(1.0, conf)),
             "rationale": str(item.get("rationale", "")).strip(),
         })
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
+# Step 1 - interpret the user's free-text project context into directives
+# --------------------------------------------------------------------------- #
+# Categories the BOQ generator (Step 2) knows how to exclude wholesale.
+CONTEXT_EXCLUDE_CATEGORIES = (
+    "service", "training", "commissioning", "spares", "fat",
+    "software", "network", "timing", "panel",
+)
+_VALID_DIRECTIVE_TYPES = {"exclude", "include", "quantity_hint", "note"}
+
+
+def interpret_context(client, dp, context_notes: str,
+                      extra_instructions: str = "") -> Optional[list[dict]]:
+    """Turn the operator's free-text context into STRUCTURED, validated directives.
+
+    The Step 1 prompt box is free text and may carry very different intents:
+    scope exclusions ("do not include training/service"), inclusions ("also add
+    breaker monitoring"), quantity hints ("6 feeders", "273 gas zones"), scope
+    clarifications, or plain background. This converts it — once — into a small
+    list of directives that BOTH steps can act on deterministically:
+
+      {"type":"exclude","category"|"scenario_id"|"family_id":..., "rationale":..}
+      {"type":"include","scenario_id"|"family_id":..., "rationale":..}
+      {"type":"quantity_hint","asset_type"|"count_field":..., "value":N, "rationale":..}
+      {"type":"note","text":...}                       # non-actionable background
+
+    Everything is validated against the controlled catalog (unknown ids dropped)
+    so free text can never inject un-grounded scenarios/products. Returns the
+    directive list, or None when the LLM is unavailable / nothing actionable.
+    """
+    from . import constants
+
+    if not client.available or not (context_notes or "").strip():
+        return None
+
+    scen = [{"scenario_id": s.scenario_id, "name": s.application_scenario}
+            for s in dp.scenarios.values()]
+    fams = [{"family_id": f.family_id, "name": f.family_name}
+            for f in dp.families.values()]
+    count_fields = sorted(constants.COUNT_FIELD_TO_ASSET_TYPE.keys())
+
+    system = (
+        "You convert a sales/application engineer's free-text project note into a "
+        "SMALL list of structured directives for a power-grid monitoring BOQ engine. "
+        "Only use IDs / categories from the provided catalogs; never invent them. "
+        "Classify each intent:\n"
+        "- exclude: the user does not want something in the current draft (by "
+        "category, scenario_id or family_id).\n"
+        "- include: the user explicitly wants something added (scenario_id or family_id).\n"
+        "- quantity_hint: the user states a countable quantity (map to a count_field "
+        "or a drawing asset_type, with a numeric value).\n"
+        "- note: background/context that is not directly actionable.\n"
+        "If the text is only background, return a single note. Respond STRICT JSON only."
+    )
+    system = _with_extra_rules(system, extra_instructions)
+    user = (
+        "Scenario catalog:\n" + json.dumps(scen, ensure_ascii=False)
+        + "\n\nFamily catalog:\n" + json.dumps(fams, ensure_ascii=False)
+        + "\n\nExclude categories:\n" + json.dumps(list(CONTEXT_EXCLUDE_CATEGORIES))
+        + "\n\nKnown count_fields:\n" + json.dumps(count_fields)
+        + "\n\nUser project note:\n" + context_notes.strip()
+        + '\n\nReturn JSON: {"directives":[{"type":"exclude|include|quantity_hint|note",'
+        '"category":"","scenario_id":"","family_id":"","asset_type":"","count_field":"",'
+        '"value":0,"text":"","rationale":"short"}]}'
+    )
+    try:
+        data = client.complete_json(system, user)
+    except Exception:  # noqa: BLE001 - fail safe
+        return None
+    if not isinstance(data, dict) or "directives" not in data:
+        return None
+
+    valid_scen = set(dp.scenarios.keys())
+    valid_fam = set(dp.families.keys())
+    valid_cat = set(CONTEXT_EXCLUDE_CATEGORIES)
+    valid_cf = set(count_fields)
+    out: list[dict] = []
+    for item in data.get("directives", []):
+        if not isinstance(item, dict):
+            continue
+        dtype = str(item.get("type", "")).strip().lower()
+        if dtype not in _VALID_DIRECTIVE_TYPES:
+            continue
+        cat = str(item.get("category", "")).strip().lower()
+        sid = str(item.get("scenario_id", "")).strip()
+        fid = str(item.get("family_id", "")).strip()
+        atype = str(item.get("asset_type", "")).strip()
+        cfield = str(item.get("count_field", "")).strip()
+        text = str(item.get("text", "")).strip()
+        rationale = str(item.get("rationale", "")).strip()
+        sid = sid if sid in valid_scen else ""
+        fid = fid if fid in valid_fam else ""
+        cat = cat if cat in valid_cat else ""
+        cfield = cfield if cfield in valid_cf else ""
+
+        if dtype == "exclude" and (cat or sid or fid):
+            out.append({"type": "exclude", "category": cat, "scenario_id": sid,
+                        "family_id": fid, "rationale": rationale})
+        elif dtype == "include" and (sid or fid):
+            out.append({"type": "include", "scenario_id": sid, "family_id": fid,
+                        "rationale": rationale})
+        elif dtype == "quantity_hint" and (cfield or atype):
+            try:
+                val = float(item.get("value", 0) or 0)
+            except (TypeError, ValueError):
+                val = 0.0
+            if val > 0:
+                out.append({"type": "quantity_hint", "asset_type": atype,
+                            "count_field": cfield, "value": val,
+                            "rationale": rationale})
+        elif dtype == "note" and text:
+            out.append({"type": "note", "text": text})
     return out or None
 
 
@@ -342,6 +474,84 @@ def suggest_missing_info(client, project_summary: dict,
 
 
 # --------------------------------------------------------------------------- #
+# Step 2 - regenerate BOQ lines from reviewer feedback
+# --------------------------------------------------------------------------- #
+_VALID_FEEDBACK_ACTIONS = {"keep", "remove", "replace", "adjust"}
+
+
+def regenerate_boq_lines(
+    client, project_summary: dict, flagged_lines: list[dict]
+) -> Optional[list[dict]]:
+    """Re-decide BOQ lines that received negative reviewer feedback.
+
+    ``flagged_lines`` items:
+      {feedbackKey, product_model, product_description, scenario_id,
+       scenario_name, quantity, unit, quantity_basis, feedback_comment,
+       candidates: [{product_id, model, description}]}
+
+    Returns a list of decisions:
+      {feedbackKey, action(keep|remove|replace|adjust), product_id,
+       product_model, quantity, unit, rationale}
+    or None when the LLM is unavailable / the response is unusable.
+
+    The model may only pick a ``product_id`` from that line's ``candidates`` —
+    it must not invent product models outside the catalog.
+    """
+    if not client.available or not flagged_lines:
+        return None
+
+    system = (
+        "You are a senior Qualitrol application engineer REVISING a draft BOQ "
+        "using a reviewer's written feedback for specific lines. For EACH flagged "
+        "line choose exactly one action:\n"
+        "  - 'remove': the item is out of scope / not supplied by Qualitrol / not "
+        "needed (e.g. supplied with the GIS or transformer package).\n"
+        "  - 'replace': the wrong product family/model was chosen; pick a better "
+        "one ONLY from that line's 'candidates' list (use its product_id).\n"
+        "  - 'adjust': the product is right but the quantity is wrong; set the "
+        "corrected integer quantity.\n"
+        "  - 'keep': feedback does not warrant a change.\n"
+        "Rules: NEVER invent a product_id/model that is not in the line's "
+        "candidates. Base your decision strictly on the reviewer feedback text. "
+        "Give a short rationale citing the feedback. Respond with STRICT JSON only."
+    )
+    user = (
+        "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
+        + "\n\nFlagged BOQ lines (with reviewer feedback and allowed candidates):\n"
+        + json.dumps(flagged_lines, ensure_ascii=False)
+        + '\n\nReturn JSON: {"lines":[{"feedbackKey":"...",'
+        '"action":"keep|remove|replace|adjust","product_id":"...",'
+        '"product_model":"...","quantity":<integer or null>,"unit":"...",'
+        '"rationale":"..."}]}'
+    )
+    data = client.complete_json(system, user)
+    if not isinstance(data, dict) or "lines" not in data:
+        return None
+
+    out: list[dict] = []
+    for item in data.get("lines", []):
+        key = str(item.get("feedbackKey", "")).strip()
+        action = str(item.get("action", "")).strip().lower()
+        if not key or action not in _VALID_FEEDBACK_ACTIONS:
+            continue
+        qty = item.get("quantity")
+        try:
+            qty = float(qty) if qty is not None and str(qty) != "" else None
+        except (TypeError, ValueError):
+            qty = None
+        out.append({
+            "feedbackKey": key,
+            "action": action,
+            "product_id": str(item.get("product_id", "")).strip(),
+            "product_model": str(item.get("product_model", "")).strip(),
+            "quantity": qty,
+            "unit": str(item.get("unit", "")).strip(),
+            "rationale": str(item.get("rationale", "")).strip(),
+        })
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
 # Step 1 - SLD asset extraction via Claude Vision (optional VLM path)
 # --------------------------------------------------------------------------- #
 
@@ -354,6 +564,11 @@ _VALID_ASSET_TYPES = {
     # quantity rules can size BOQ lines from them.
     "Reactor", "Transmission Line", "Cable", "Surge Arrester",
     "Instrument Transformer", "Tap Changer", "Capacitor Bank", "Cabinet",
+    # GIS gas-zone vocabulary added in the 2026-07 DMS GIS SLD diagram review.
+    # Gas compartments / density sensors size the SF6 GDHT-20 quantity; the
+    # disconnector / earthing switches inform the UHF protector recommendation.
+    "Gas Compartment", "Gas Density Sensor", "Disconnector Switch",
+    "Earthing Switch",
 }
 _VALID_STATUS = {"New", "Existing", "Future", "Provision", "Unclear"}
 
@@ -437,7 +652,8 @@ def extract_sld_assets_vlm(
         "  Circuit Breaker, Transformer, GIS Bay, Bus, Feeder, PCC, Generator, Motor,\n"
         "  Switchgear Panel, PD Sensor, Sensor, Bushing, Channel, Measurement Point,\n"
         "  Reactor, Transmission Line, Cable, Surge Arrester, Instrument Transformer,\n"
-        "  Tap Changer, Capacitor Bank, Cabinet\n\n"
+        "  Tap Changer, Capacitor Bank, Cabinet,\n"
+        "  Gas Compartment, Gas Density Sensor, Disconnector Switch, Earthing Switch\n\n"
         "STATUS values (use these exact strings):\n"
         "  New        – in current project scope\n"
         "  Existing   – already installed, in scope for retrofit/monitoring\n"

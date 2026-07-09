@@ -1,0 +1,584 @@
+{
+  "meta": {
+    "width": 4967,
+    "height": 3509,
+    "title": "132kV GIS Single Line Diagram \u2014 KEZAD (KB1A)",
+    "project": "N-19876 \u00b7 KIZAD-B1 \u00b7 TAQA",
+    "file": "132kv.png"
+  },
+  "detections": [
+    {
+      "id": "D001",
+      "type": "gis_bay",
+      "label": "E01 \u00b7 Future-1",
+      "bbox": [
+        317,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.9,
+      "note": "132kV GIS bay E01 \u2014 Future-1",
+      "status": "pending",
+      "props": {
+        "bay": "E01",
+        "function": "future"
+      }
+    },
+    {
+      "id": "D002",
+      "type": "gis_bay",
+      "label": "E02 \u00b7 Future-2",
+      "bbox": [
+        517,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.9,
+      "note": "132kV GIS bay E02 \u2014 Future-2",
+      "status": "pending",
+      "props": {
+        "bay": "E02",
+        "function": "future"
+      }
+    },
+    {
+      "id": "D003",
+      "type": "gis_bay",
+      "label": "E03 \u00b7 Cable Feeder-1 (from KB1G)",
+      "bbox": [
+        735,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E03 \u2014 Cable Feeder-1 (from KB1G)",
+      "status": "pending",
+      "props": {
+        "bay": "E03",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D004",
+      "type": "circuit_breaker",
+      "label": "E03 CB Q0 (3150A)",
+      "bbox": [
+        790,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E03",
+      "status": "pending",
+      "props": {
+        "bay": "E03"
+      }
+    },
+    {
+      "id": "D005",
+      "type": "gis_bay",
+      "label": "E04 \u00b7 Cable Feeder-2 (from KZDN)",
+      "bbox": [
+        945,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E04 \u2014 Cable Feeder-2 (from KZDN)",
+      "status": "pending",
+      "props": {
+        "bay": "E04",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D006",
+      "type": "circuit_breaker",
+      "label": "E04 CB Q0 (3150A)",
+      "bbox": [
+        1000,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E04",
+      "status": "pending",
+      "props": {
+        "bay": "E04"
+      }
+    },
+    {
+      "id": "D007",
+      "type": "gis_bay",
+      "label": "E05 \u00b7 Trans Incomer-1",
+      "bbox": [
+        1163,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E05 \u2014 Trans Incomer-1",
+      "status": "pending",
+      "props": {
+        "bay": "E05",
+        "function": "trans_incomer"
+      }
+    },
+    {
+      "id": "D008",
+      "type": "circuit_breaker",
+      "label": "E05 CB Q0 (3150A)",
+      "bbox": [
+        1218,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E05",
+      "status": "pending",
+      "props": {
+        "bay": "E05"
+      }
+    },
+    {
+      "id": "D009",
+      "type": "gis_bay",
+      "label": "E06 \u00b7 Cable Feeder-3",
+      "bbox": [
+        1372,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E06 \u2014 Cable Feeder-3",
+      "status": "pending",
+      "props": {
+        "bay": "E06",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D010",
+      "type": "circuit_breaker",
+      "label": "E06 CB Q0 (3150A)",
+      "bbox": [
+        1427,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E06",
+      "status": "pending",
+      "props": {
+        "bay": "E06"
+      }
+    },
+    {
+      "id": "D011",
+      "type": "gis_bay",
+      "label": "E07 \u00b7 Trans Incomer-2",
+      "bbox": [
+        1585,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E07 \u2014 Trans Incomer-2",
+      "status": "pending",
+      "props": {
+        "bay": "E07",
+        "function": "trans_incomer"
+      }
+    },
+    {
+      "id": "D012",
+      "type": "circuit_breaker",
+      "label": "E07 CB Q0 (3150A)",
+      "bbox": [
+        1640,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E07",
+      "status": "pending",
+      "props": {
+        "bay": "E07"
+      }
+    },
+    {
+      "id": "D013",
+      "type": "gis_bay",
+      "label": "E08 \u00b7 Bus Coupler 1A-2A & Metering",
+      "bbox": [
+        1847,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E08 \u2014 Bus Coupler 1A-2A & Metering",
+      "status": "pending",
+      "props": {
+        "bay": "E08",
+        "function": "bus_coupler"
+      }
+    },
+    {
+      "id": "D014",
+      "type": "circuit_breaker",
+      "label": "E08 CB Q0 (3150A)",
+      "bbox": [
+        1902,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E08",
+      "status": "pending",
+      "props": {
+        "bay": "E08"
+      }
+    },
+    {
+      "id": "D015",
+      "type": "gis_bay",
+      "label": "E09 \u00b7 Trans Incomer-3",
+      "bbox": [
+        2132,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E09 \u2014 Trans Incomer-3",
+      "status": "pending",
+      "props": {
+        "bay": "E09",
+        "function": "trans_incomer"
+      }
+    },
+    {
+      "id": "D016",
+      "type": "circuit_breaker",
+      "label": "E09 CB Q0 (3150A)",
+      "bbox": [
+        2187,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E09",
+      "status": "pending",
+      "props": {
+        "bay": "E09"
+      }
+    },
+    {
+      "id": "D017",
+      "type": "gis_bay",
+      "label": "E10 \u00b7 Cable Feeder-4",
+      "bbox": [
+        2379,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E10 \u2014 Cable Feeder-4",
+      "status": "pending",
+      "props": {
+        "bay": "E10",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D018",
+      "type": "circuit_breaker",
+      "label": "E10 CB Q0 (3150A)",
+      "bbox": [
+        2434,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E10",
+      "status": "pending",
+      "props": {
+        "bay": "E10"
+      }
+    },
+    {
+      "id": "D019",
+      "type": "gis_bay",
+      "label": "E11 \u00b7 Trans Incomer-4",
+      "bbox": [
+        2626,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E11 \u2014 Trans Incomer-4",
+      "status": "pending",
+      "props": {
+        "bay": "E11",
+        "function": "trans_incomer"
+      }
+    },
+    {
+      "id": "D020",
+      "type": "circuit_breaker",
+      "label": "E11 CB Q0 (3150A)",
+      "bbox": [
+        2681,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E11",
+      "status": "pending",
+      "props": {
+        "bay": "E11"
+      }
+    },
+    {
+      "id": "D021",
+      "type": "gis_bay",
+      "label": "E12 \u00b7 Cable Feeder-5",
+      "bbox": [
+        2873,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E12 \u2014 Cable Feeder-5",
+      "status": "pending",
+      "props": {
+        "bay": "E12",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D022",
+      "type": "circuit_breaker",
+      "label": "E12 CB Q0 (3150A)",
+      "bbox": [
+        2928,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E12",
+      "status": "pending",
+      "props": {
+        "bay": "E12"
+      }
+    },
+    {
+      "id": "D023",
+      "type": "gis_bay",
+      "label": "E13 \u00b7 Cable Feeder-6 (from KB1G)",
+      "bbox": [
+        3101,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.93,
+      "note": "132kV GIS bay E13 \u2014 Cable Feeder-6 (from KB1G)",
+      "status": "pending",
+      "props": {
+        "bay": "E13",
+        "function": "cable_feeder"
+      }
+    },
+    {
+      "id": "D024",
+      "type": "circuit_breaker",
+      "label": "E13 CB Q0 (3150A)",
+      "bbox": [
+        3156,
+        1575,
+        40,
+        58
+      ],
+      "confidence": 0.88,
+      "note": "Circuit breaker in bay E13",
+      "status": "pending",
+      "props": {
+        "bay": "E13"
+      }
+    },
+    {
+      "id": "D025",
+      "type": "gis_bay",
+      "label": "E14 \u00b7 Space for Cap. Bank",
+      "bbox": [
+        3329,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.9,
+      "note": "132kV GIS bay E14 \u2014 Space for Cap. Bank",
+      "status": "pending",
+      "props": {
+        "bay": "E14",
+        "function": "cap_bank"
+      }
+    },
+    {
+      "id": "D026",
+      "type": "gis_bay",
+      "label": "E15 \u00b7 Future-3",
+      "bbox": [
+        3557,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.9,
+      "note": "132kV GIS bay E15 \u2014 Future-3",
+      "status": "pending",
+      "props": {
+        "bay": "E15",
+        "function": "future"
+      }
+    },
+    {
+      "id": "D027",
+      "type": "gis_bay",
+      "label": "E16 \u00b7 Future-4",
+      "bbox": [
+        3785,
+        1392,
+        150,
+        513
+      ],
+      "confidence": 0.9,
+      "note": "132kV GIS bay E16 \u2014 Future-4",
+      "status": "pending",
+      "props": {
+        "bay": "E16",
+        "function": "future"
+      }
+    },
+    {
+      "id": "D028",
+      "type": "power_transformer",
+      "label": "T01 \u00b7 31.5/40MVA 132/11.5kV",
+      "bbox": [
+        1188,
+        895,
+        74,
+        120
+      ],
+      "confidence": 0.95,
+      "note": "Power transformer T01, 31.5/40MVA ONAN/ONAF",
+      "status": "pending",
+      "props": {
+        "rating": "31.5/40MVA"
+      }
+    },
+    {
+      "id": "D029",
+      "type": "power_transformer",
+      "label": "T02 \u00b7 31.5/40MVA 132/11.5kV",
+      "bbox": [
+        1623,
+        895,
+        74,
+        120
+      ],
+      "confidence": 0.95,
+      "note": "Power transformer T02, 31.5/40MVA ONAN/ONAF",
+      "status": "pending",
+      "props": {
+        "rating": "31.5/40MVA"
+      }
+    },
+    {
+      "id": "D030",
+      "type": "power_transformer",
+      "label": "T03 \u00b7 31.5/40MVA 132/11.5kV",
+      "bbox": [
+        2213,
+        895,
+        74,
+        120
+      ],
+      "confidence": 0.95,
+      "note": "Power transformer T03, 31.5/40MVA ONAN/ONAF",
+      "status": "pending",
+      "props": {
+        "rating": "31.5/40MVA"
+      }
+    },
+    {
+      "id": "D031",
+      "type": "power_transformer",
+      "label": "T04 \u00b7 31.5/40MVA 132/11.5kV",
+      "bbox": [
+        2648,
+        895,
+        74,
+        120
+      ],
+      "confidence": 0.95,
+      "note": "Power transformer T04, 31.5/40MVA ONAN/ONAF",
+      "status": "pending",
+      "props": {
+        "rating": "31.5/40MVA"
+      }
+    },
+    {
+      "id": "D032",
+      "type": "busbar",
+      "label": "BB1A (3150A)",
+      "bbox": [
+        360,
+        1370,
+        3590,
+        16
+      ],
+      "confidence": 0.9,
+      "note": "132kV busbar BB1A (3150A)",
+      "status": "pending",
+      "props": {}
+    },
+    {
+      "id": "D033",
+      "type": "busbar",
+      "label": "BB2A (3150A)",
+      "bbox": [
+        360,
+        1422,
+        3590,
+        16
+      ],
+      "confidence": 0.9,
+      "note": "132kV busbar BB2A (3150A)",
+      "status": "pending",
+      "props": {}
+    }
+  ]
+}

@@ -238,6 +238,18 @@ def parse_document(
         segments = [DocSegment(location="error", text=f"[parse error] {exc}")]
 
     if not segments:
+        # A PDF with no extractable text is almost always a scanned / vector
+        # drawing (SLD). Keep it — with an empty segment list — so the VLM
+        # drawing-reader can still render and read it, instead of silently
+        # dropping the file (which previously produced an empty BOQ with no
+        # explanation). Other empty/unsupported files are still skipped.
+        if ext == ".pdf" or doc_type_override:
+            return ParsedDocument(
+                file_name=path.name,
+                file_path=str(path),
+                doc_type=doc_type_override or infer_doc_type(path.name, ""),
+                segments=[],
+            )
         return None
 
     doc_type = doc_type_override or infer_doc_type(path.name, segments[0].text if segments else "")

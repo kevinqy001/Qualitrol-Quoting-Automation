@@ -272,6 +272,7 @@
 
     $("#upload-result").classList.add("hidden");
     $("#upload-progress").classList.remove("hidden");
+    renderEtaEstimate();
     setAnalysisRunning(true);
     activeAnalysisController = new AbortController();
 
@@ -280,6 +281,10 @@
     selectedSldFiles.forEach((file) => formData.append("files", file));
     // Tell the backend which filenames came from the SLD zone.
     formData.append("sld_filenames", JSON.stringify(selectedSldFiles.map((f) => f.name)));
+    // Free-text project context typed by the user; fed to the LLM as extra
+    // context when generating requirements and evidence.
+    const contextNotes = ($("#context-notes")?.value || "").trim();
+    if (contextNotes) formData.append("context_notes", contextNotes);
 
     try {
       const res = await fetch(`${API}/ingest/batch`, {
@@ -375,6 +380,18 @@
 
   $("#goto-boq").addEventListener("click", () => switchTab("boq"));
 
+  // Draft BOQ "Evidence" column: jump to the matching evidence in the list
+  // below so the user can see which requirement/evidence produced this line.
+  $("#boq-table-body").addEventListener("click", (e) => {
+    const btn = e.target.closest(".evidence-jump-btn");
+    if (!btn) return;
+    jumpToEvidence(btn.dataset.scenario || "", btn.dataset.product || "");
+  });
+
+  if ($("#btn-regenerate-boq")) {
+    $("#btn-regenerate-boq").addEventListener("click", regenerateBoqFromFeedback);
+  }
+
   // ── Tab 2: BOQ Review ──────────────────────────────────────────────────
   // The currently displayed case + a pristine snapshot of its auto-generated
   // line items (used by the Edit BOQ "Reset" action).
@@ -389,6 +406,13 @@
     if (!el) return;
     const boldify = (s) =>
       escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    // For the Applications & Qualitrol Products points, keep only the product
+    // count bold; application names and product descriptions render as plain
+    // text (their emphasis markers are stripped).
+    const boldifyCountOnly = (s) =>
+      escapeHtml(s).replace(/\*\*(.+?)\*\*/g, (_m, inner) =>
+        /product line/i.test(inner) ? `<strong>${inner}</strong>` : inner
+      );
     const text = (summary || "").trim();
     const APP = "Monitoring applications identified:";
     const CAT = "Qualitrol product categories involved:";
@@ -408,9 +432,9 @@
     const products = text.slice(iCat + CAT.length).trim();
 
     const points = [
-      { title: "Project Type", body: projectType },
-      { title: "Monitoring Applications", body: applications },
-      { title: "Qualitrol Products", body: products },
+      { title: "Project Type", body: projectType, render: boldify },
+      { title: "Monitoring Applications", body: applications, render: boldifyCountOnly },
+      { title: "Qualitrol Products", body: products, render: boldifyCountOnly },
     ];
 
     el.innerHTML = points
@@ -418,7 +442,7 @@
       .map(
         (p, i) => `<div style="margin:${i === 0 ? "0" : "10px"} 0 0;">
           <p style="margin:0 0 3px; font-size:11px; font-weight:850; letter-spacing:0.08em; text-transform:uppercase; color:var(--ralliant-brown);">${escapeHtml(p.title)}</p>
-          <p class="section-copy" style="margin:0;">${boldify(p.body)}</p>
+          <p class="section-copy" style="margin:0;">${p.render(p.body)}</p>
         </div>`
       )
       .join("");
@@ -429,10 +453,12 @@
     renderSummaryPoints(boq.extractionSummary);
     renderFeatures(boq.features || {});
     renderMissingInfoQuestions(boq.missingInfoQuestions || []);
-    renderRequirements(boq.requirements || []);
+    renderEvidenceList(boq);
     if (boq.source) {
-      $("#source-badge").textContent = `${boq.source.fileName || "uploaded"} · ${boq.source.fileType || "file"}`;
-      $("#source-doc").textContent = boq.source.preview || "No readable source preview returned.";
+      const sourceBadge = $("#source-badge");
+      const sourceDoc = $("#source-doc");
+      if (sourceBadge) sourceBadge.textContent = `${boq.source.fileName || "uploaded"} · ${boq.source.fileType || "file"}`;
+      if (sourceDoc) sourceDoc.textContent = boq.source.preview || "No readable source preview returned.";
     }
 
     // Show/hide the "Download BOQ (Excel)" button based on availability.
@@ -470,6 +496,56 @@
     originalLineItems = JSON.parse(JSON.stringify(boq.lineItems || []));
     renderBoqTable(boq.lineItems || []);
     setupFeedback(boq);
+    updateRegenerateButton();
+  }
+
+  // Show "Apply feedback & regenerate" only when at least one BOQ line has been
+  // thumbed-down (and we have a backend to regenerate with).
+  function updateRegenerateButton() {
+    const btn = $("#btn-regenerate-boq");
+    if (!btn) return;
+    const items = (currentExtraction && currentExtraction.lineItems) || [];
+    const hasNeg = !IS_STATIC && items.some((it) => it.feedback === "Negative");
+    btn.classList.toggle("hidden", !hasNeg);
+  }
+
+  async function regenerateBoqFromFeedback() {
+    if (IS_STATIC) return;
+    const caseId =
+      currentExtraction && (currentExtraction.caseReference || currentExtraction.boqId);
+    if (!caseId) return;
+    const btn = $("#btn-regenerate-boq");
+    const orig = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = "<span>Regenerating…</span>";
+    }
+    try {
+      const res = await fetch(
+        `${API}/boq/${encodeURIComponent(caseId)}/regenerate`,
+        { method: "POST" }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (data.extraction) {
+        renderExtraction(data.extraction);
+        const list = loadHistory();
+        const rec = list.find((c) => c.caseId === (data.caseId || caseId));
+        if (rec) {
+          rec.extraction = data.extraction;
+          writeHistory(list);
+        }
+      }
+      const n = (data.changes || []).length;
+      alert(`BOQ regenerated from your feedback — ${n} line(s) updated. Revised lines are marked "Needs Review".`);
+    } catch (err) {
+      alert(`Couldn't regenerate the BOQ: ${err.message}`);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = orig;
+      }
+    }
   }
 
   function renderBoqTable(lineItems) {
@@ -478,7 +554,7 @@
 
     if (!lineItems || !lineItems.length) {
       tbody.innerHTML =
-        `<tr><td colspan="5" style="text-align:center; color: var(--muted); padding: 32px;">No Qualitrol product lines detected</td></tr>`;
+        `<tr><td colspan="6" style="text-align:center; color: var(--muted); padding: 32px;">No Qualitrol product lines detected</td></tr>`;
       return;
     }
 
@@ -495,9 +571,11 @@
       const HIDDEN_PARAMS = new Set(["review", "basis", "related"]);
       // "scenario" is shown as its readable name heading, not the raw code.
       let scenarioVal = "";
+      let scenarioId = "";
       Object.entries(params).forEach(([k, v]) => {
         if (String(k).trim().toLowerCase() === "scenario") {
           const id = Array.isArray(v) ? v.join(", ") : String(v);
+          scenarioId = id.trim();
           scenarioVal = scenarioNames[id.trim().toLowerCase()] || id;
         }
       });
@@ -526,6 +604,13 @@
         })
         .join("");
 
+      const evidenceCell = scenarioId
+        ? `<button type="button" class="evidence-jump-btn" data-scenario="${escapeHtml(scenarioId)}" data-product="${escapeHtml(String(item.product_id ?? ""))}" title="Jump to the evidence this product line was derived from">
+             <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+             <span>Evidence</span>
+           </button>`
+        : '<span style="color:var(--muted);">—</span>';
+
       tbody.insertAdjacentHTML(
         "beforeend",
         `<tr>
@@ -534,10 +619,212 @@
           <td>${escapeHtml(String(item.description ?? ""))}</td>
           <td class="text-right" style="font-weight:700;">${escapeHtml(String(item.quantity ?? ""))} ${escapeHtml(item.unit || "")}</td>
           <td>${scenarioHeading}${chips || (scenarioHeading ? "" : '<span style="color:var(--muted);">—</span>')}</td>
+          <td class="text-right">${evidenceCell}</td>
         </tr>`
       );
     });
   }
+
+  // ── Review Spec Sections modal ─────────────────────────────────────────
+  // Spec-document-only requirement list. The reviewer can edit/delete items and
+  // then "Start New Analysis" to regenerate the BOQ from the edited spec scope
+  // (plus SLD-derived scope). "Review Draft BOQ" jumps to the review tab.
+  const specModal = $("#spec-modal");
+  let specSections = [];   // working copy: [{...item, deleted}]
+  let specCaseId = null;
+
+  async function openSpecModal() {
+    if (IS_STATIC) {
+      alert("Spec section review isn't available in the static demo.");
+      return;
+    }
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (!caseId) {
+      alert("Run an analysis (or load the sample) first.");
+      return;
+    }
+    specCaseId = caseId;
+    if (specModal) specModal.classList.remove("hidden");
+    $("#spec-list").innerHTML = "";
+    $("#spec-count").textContent = "Loading…";
+    $("#spec-docs").textContent = "";
+    $("#spec-foot-status").textContent = "";
+    try {
+      const res = await fetch(`${API}/spec/sections/${encodeURIComponent(caseId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      specSections = (data.items || []).map((it) => ({ ...it, deleted: false }));
+      $("#spec-docs").textContent = (data.documents || []).length
+        ? "Source: " + data.documents.join(", ")
+        : "";
+      renderSpecSections();
+    } catch (err) {
+      $("#spec-list").innerHTML =
+        `<div class="spec-empty">Couldn't load spec sections: ${escapeHtml(err.message)}</div>`;
+      $("#spec-count").textContent = "";
+    }
+  }
+
+  // Same colour ramp as the Requirement Review confidence pills:
+  // ~60%→red, ~70%→orange, ~80%→yellow, ~100%→green (below 60% clamps to red).
+  function specConfColor(v) {
+    if (v == null) return "#9aa0a6";
+    const t = Math.max(0, Math.min(1, (v - 0.6) / 0.4));
+    return `hsl(${Math.round(t * 120)}, 70%, 42%)`;
+  }
+
+  function renderSpecSections() {
+    const list = $("#spec-list");
+    if (!list) return;
+    const active = specSections.filter((s) => !s.deleted);
+    const removed = specSections.length - active.length;
+    $("#spec-count").textContent = specSections.length
+      ? `${active.length} requirement${active.length !== 1 ? "s" : ""}` +
+        (removed ? ` · ${removed} removed` : "")
+      : "No spec-derived requirements found.";
+    if (!specSections.length) {
+      list.innerHTML =
+        `<div class="spec-empty">No requirements were extracted from specification documents (this may be an SLD-only submission, or nothing matched).</div>`;
+      return;
+    }
+    list.innerHTML = "";
+    specSections.forEach((it, idx) => {
+      const loc = [
+        it.document || "",
+        it.page ? `page ${it.page}` : "",
+        it.line ? `line ${it.line}` : "",
+      ].filter(Boolean).join(" · ");
+      const conf = Math.round((it.confidence || 0) * 100);
+      const reasonText = (it.reason || "").trim();
+      const el = document.createElement("div");
+      el.className = "spec-item" + (it.deleted ? " spec-deleted" : "");
+      el.dataset.idx = String(idx);
+      el.innerHTML = `
+        <div class="spec-grid">
+          <div class="spec-head-l">
+            <span class="spec-field-label">Scenario</span>
+            <span class="conf-pill" style="background:${specConfColor(it.confidence)};" title="Detection confidence for this requirement's scenario.">
+              <span class="conf-dot"></span>${conf}% confidence
+            </span>
+          </div>
+          <div class="spec-head-r">
+            <span class="spec-field-label">Source region</span>
+          </div>
+          <div class="spec-body-l">
+            <input class="spec-input" data-field="scenario" value="${escapeHtml(it.scenario || "")}" ${it.deleted ? "disabled" : ""} />
+            <div class="spec-field-label">Asset</div>
+            <input class="spec-input" data-field="assetType" value="${escapeHtml(it.assetType || "")}" placeholder="—" ${it.deleted ? "disabled" : ""} />
+            <div class="spec-field-label">Reason — why this is relevant</div>
+            <div class="spec-reason-text">${reasonText ? escapeHtml(reasonText) : '<span class="spec-reason-empty">—</span>'}</div>
+          </div>
+          <div class="spec-img-wrap" data-img-for="${escapeHtml(it.id)}">
+            <div class="spec-img-empty">${it.hasImage === false ? "No preview available for this location." : "Loading preview…"}</div>
+          </div>
+        </div>
+        <div class="spec-footrow">
+          <span class="spec-loc" title="Location in the source document">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"/></svg>
+            <span class="spec-loc-text">${escapeHtml(loc || "Location unavailable")}</span>
+          </span>
+          <button type="button" class="spec-del-btn" data-action="${it.deleted ? "restore" : "delete"}">${it.deleted ? "Restore" : "Delete"}</button>
+        </div>`;
+      list.appendChild(el);
+
+      if (it.hasImage !== false && it.imageUrl) {
+        const wrap = el.querySelector("[data-img-for]");
+        const img = new Image();
+        img.alt = "Source region for " + (it.scenario || "requirement");
+        img.onload = () => { wrap.innerHTML = ""; wrap.appendChild(img); };
+        img.onerror = () => {
+          wrap.innerHTML = `<div class="spec-img-empty">No preview available.</div>`;
+        };
+        img.addEventListener("click", () => window.open(it.imageUrl, "_blank"));
+        img.src = it.imageUrl;
+      }
+    });
+  }
+
+  function closeSpecModal() {
+    if (specModal) specModal.classList.add("hidden");
+  }
+
+  async function specStartAnalysis() {
+    if (IS_STATIC || !specCaseId) return;
+    const btn = $("#btn-spec-analyze");
+    const orig = btn ? btn.innerHTML : "";
+    if (btn) { btn.disabled = true; btn.innerHTML = "<span>Regenerating…</span>"; }
+    $("#spec-foot-status").textContent =
+      "Regenerating the BOQ from your edited spec requirements…";
+    try {
+      const items = specSections.map((s) => ({
+        id: s.id,
+        scenario: s.scenario,
+        assetType: s.assetType,
+        reason: s.reason,
+        snippet: s.snippet,
+        deleted: !!s.deleted,
+      }));
+      const res = await fetch(
+        `${API}/boq/${encodeURIComponent(specCaseId)}/rebuild-from-spec`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }) }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (data.extraction) {
+        renderExtraction(data.extraction);
+        const list = loadHistory();
+        const rec = list.find((c) => c.caseId === (data.caseId || specCaseId));
+        if (rec) { rec.extraction = data.extraction; writeHistory(list); }
+      }
+      const removed = (data.removedScenarios || []).length;
+      $("#spec-foot-status").textContent =
+        `BOQ regenerated${removed ? ` · ${removed} scenario(s) removed from scope` : ""}. Click “Review Draft BOQ” to view it.`;
+    } catch (err) {
+      $("#spec-foot-status").textContent = "";
+      alert("Couldn't regenerate the BOQ: " + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    }
+  }
+
+  if ($("#review-spec-sections")) {
+    $("#review-spec-sections").addEventListener("click", openSpecModal);
+  }
+  if ($("#boq-review-spec")) {
+    $("#boq-review-spec").addEventListener("click", openSpecModal);
+  }
+  if ($("#btn-spec-close")) $("#btn-spec-close").addEventListener("click", closeSpecModal);
+  if ($("#btn-spec-goboq")) {
+    $("#btn-spec-goboq").addEventListener("click", () => { closeSpecModal(); switchTab("boq"); });
+  }
+  if ($("#btn-spec-analyze")) {
+    $("#btn-spec-analyze").addEventListener("click", specStartAnalysis);
+  }
+  if (specModal) {
+    specModal.addEventListener("click", (e) => { if (e.target === specModal) closeSpecModal(); });
+    $("#spec-list").addEventListener("input", (e) => {
+      const row = e.target.closest(".spec-item");
+      if (!row) return;
+      const idx = Number(row.dataset.idx);
+      const field = e.target.dataset.field;
+      if (field && specSections[idx]) specSections[idx][field] = e.target.value;
+    });
+    $("#spec-list").addEventListener("click", (e) => {
+      const actBtn = e.target.closest("[data-action]");
+      if (!actBtn) return;
+      const row = e.target.closest(".spec-item");
+      const idx = Number(row.dataset.idx);
+      if (!specSections[idx]) return;
+      specSections[idx].deleted = actBtn.dataset.action === "delete";
+      renderSpecSections();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && specModal && !specModal.classList.contains("hidden")) {
+      closeSpecModal();
+    }
+  });
 
   const renderBoq = renderExtraction;
 
@@ -663,9 +950,9 @@
       dnp3: "DNP3",
     };
     const enabled = Object.entries(labels).filter(([key]) => features[key]);
-    $("#feature-chips").innerHTML = enabled.length
-      ? enabled.map(([, label]) => `<span class="badge success">${label}</span>`).join("")
-      : `<span class="badge">No feature flags</span>`;
+    $("#feature-chips").innerHTML = enabled
+      .map(([, label]) => `<span class="badge success">${label}</span>`)
+      .join("");
   }
 
   function priorityClass(priority) {
@@ -712,90 +999,171 @@
     // panel.classList.remove("hidden");  // section hidden per UI decision
   }
 
-  function renderRequirements(requirements) {
+  // Evidence & recommendation basis — one card per BOQ product line, explaining
+  // why the product was recommended and from which source text it was derived.
+  // Each card carries data-scenario so the Draft BOQ "Evidence" button can jump
+  // straight to it.
+  function renderEvidenceList(boq) {
     const list = $("#requirements-list");
-    if (!requirements.length) {
-      list.innerHTML = `<div style="text-align:center; color: var(--muted);">No Qualitrol requirements detected</div>`;
+    if (!list) return;
+
+    const lineItems = boq.lineItems || [];
+    const matching = boq.productMatching || [];
+    const requirements = boq.requirements || [];
+    const detected = boq.detectedScenarios || [];
+
+    if (!lineItems.length) {
+      list.innerHTML = `<div style="text-align:center; color: var(--muted);">No BOQ product lines to explain yet</div>`;
       return;
     }
-    list.innerHTML = requirements
-      .map((req, i) => {
-        // Pull the requirement "type" out as the headline badge; render any
-        // remaining technical params as chips instead of raw JSON.
-        const params = { ...(req.technicalParams || {}) };
-        const reqType = params.type;
-        delete params.type;
 
-        const chips = Object.entries(params)
-          .map(([k, v]) => {
-            const val = Array.isArray(v) ? v.join(", ") : String(v);
-            return `<span class="badge">${escapeHtml(k)}: ${escapeHtml(val)}</span>`;
-          })
-          .join("");
+    // scenario_id -> readable name / detected confidence.
+    const scenarioNames = {};
+    const scenarioConf = {};
+    detected.forEach((d) => {
+      if (d && d.scenario_id) {
+        const k = String(d.scenario_id).trim().toLowerCase();
+        scenarioNames[k] = d.scenario || "";
+        scenarioConf[k] = d.confidence;
+      }
+    });
 
-        const badgeText = req.quantity
-          ? `${req.quantity} ${req.unit || ""}`.trim()
-          : (reqType || "Requirement");
-        const confidence = req.confidence
-          ? Math.round(req.confidence * 100) + "%"
-          : "—";
-        const kicker = `${escapeHtml(req.category || "Requirement")}${
-          req.productCode ? " · " + escapeHtml(req.productCode) : ""
-        }`;
+    // candidate_product_id -> product-matching entry (why it was recommended).
+    const matchByProduct = {};
+    const matchByFamily = {};
+    matching.forEach((m) => {
+      if (!m) return;
+      if (m.candidate_product_id) matchByProduct[m.candidate_product_id] = m;
+      if (m.family_id && !matchByFamily[m.family_id]) matchByFamily[m.family_id] = m;
+    });
 
-        return `<article>
-          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
-            <div style="min-width:0;">
-              <p class="section-kicker" style="margin-bottom:4px;">${kicker}</p>
-              <h4 style="margin:0; font-weight:800; color: var(--ink);">${escapeHtml(req.requirement || "Untitled requirement")}</h4>
-              ${chips ? `<div class="chip-row" style="justify-content:flex-start; margin-top:10px;">${chips}</div>` : ""}
+    // scenario_id -> unique source-text snippets pulled from the documents.
+    const evBySid = {};
+    requirements.forEach((r) => {
+      const sid = String(r.productCode || "").trim().toLowerCase();
+      if (!sid) return;
+      const snip = (r.evidence || "").trim();
+      if (!snip || /^no evidence/i.test(snip)) return;
+      (evBySid[sid] = evBySid[sid] || []);
+      if (!evBySid[sid].includes(snip)) evBySid[sid].push(snip);
+    });
+
+    // Solid pill colour scaled by confidence over the 60%–100% band:
+    // ~60% = red, ~70% = orange, ~80% = yellow, ~100% = green (below 60% clamps
+    // to red). Full 0–100% range isn't useful since scores rarely go that low.
+    const confColor = (v) => {
+      if (v == null) return "#9aa0a6"; // neutral grey when unknown
+      const t = Math.max(0, Math.min(1, (v - 0.6) / 0.4)); // 0.6→0(red) … 1.0→1(green)
+      const hue = Math.round(t * 120); // 0 = red, 60 = yellow, 120 = green
+      return `hsl(${hue}, 70%, 42%)`;
+    };
+
+    const reasonRow = (label, value) =>
+      `<div style="display:flex; gap:8px; margin:0 0 5px;">
+         <span style="flex:0 0 118px; font-size:11px; font-weight:800; letter-spacing:0.03em; text-transform:uppercase; color:var(--muted); padding-top:1px;">${escapeHtml(label)}</span>
+         <span style="flex:1; min-width:0; font-size:13px; color:var(--ink); line-height:1.45;">${value}</span>
+       </div>`;
+
+    list.innerHTML = lineItems
+      .map((item) => {
+        const sid = String((item.technicalParams && item.technicalParams.scenario) || "").trim();
+        const sidLow = sid.toLowerCase();
+        const scenarioName = scenarioNames[sidLow] || sid || "General scope";
+        const productName = item.product_model || item.productCode || "TBD";
+        const desc = item.description || "";
+        const match = matchByProduct[item.product_id] || null;
+
+        // Confidence: prefer the product line's own score, then the product
+        // match score, then the detected-scenario confidence.
+        let confVal = null;
+        if (typeof item.confidence === "number" && item.confidence > 0) confVal = item.confidence;
+        else if (match && typeof match.match_score === "number" && match.match_score > 0) confVal = match.match_score;
+        else if (typeof scenarioConf[sidLow] === "number") confVal = scenarioConf[sidLow];
+        const confPct = confVal != null ? Math.round(confVal * 100) + "%" : "—";
+
+        // "Why recommended" rows.
+        const rows = [];
+        rows.push(reasonRow("Application", `<strong>${escapeHtml(scenarioName)}</strong> — matched from the project documents`));
+        if (match && match.matched_parameters) {
+          rows.push(reasonRow("Confirmed specs", escapeHtml(match.matched_parameters)));
+        }
+        const basis = item.quantityBasis || (item.technicalParams && item.technicalParams.basis) || "";
+        if (basis) rows.push(reasonRow("Quantity basis", escapeHtml(basis)));
+        const recommendation = (match && match.recommendation) || "";
+        if (recommendation) rows.push(reasonRow("Recommendation", escapeHtml(recommendation)));
+        const gap = (match && match.gap_or_risk) || item.assumption || "";
+        if (gap) rows.push(reasonRow("To confirm", escapeHtml(gap)));
+
+        // Source evidence: the actual sentence(s) from the spec, if any.
+        const snippets = (evBySid[sidLow] || []).slice(0, 2);
+        const evidenceHtml = snippets.length
+          ? snippets.map((s) => `<blockquote>${escapeHtml(s)}</blockquote>`).join("")
+          : `<blockquote style="color:var(--muted);">Derived from the drawing / scope (no single spec sentence). Confirm against the source documents.</blockquote>`;
+
+        const fbKeyEsc = escapeHtml(String(lineFbKey(item, 0)));
+        const feedbackBtn = IS_STATIC ? "" : `<button type="button" class="btn-primary req-fb-open" data-fbkey="${fbKeyEsc}" title="Give feedback on this line" style="padding:7px 14px;">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.5a2.25 2.25 0 002.25 2.25h9.19l3.31 3.31V6.75A2.25 2.25 0 0016.94 4.5H4.5A2.25 2.25 0 002.25 6.75v6z"/></svg>
+                <span>Feedback</span>
+              </button>`;
+        return `<article data-scenario="${escapeHtml(sid)}" data-product="${escapeHtml(String(item.product_id ?? ""))}">
+          <div style="display:flex; align-items:flex-start; gap:16px;">
+            <div style="flex:1; min-width:0;">
+              <h4 style="margin:0; font-weight:800; color: var(--ink);">${escapeHtml(productName)}${desc ? ` <span style="font-weight:600; color:var(--muted);">— ${escapeHtml(desc)}</span>` : ""}</h4>
+              <div style="margin-top:12px;">${rows.join("")}</div>
+              ${evidenceHtml}
             </div>
-            <div style="flex:0 0 auto; text-align:right;">
-              <span class="badge accent">${escapeHtml(String(badgeText))}</span>
-              <p class="section-copy" style="margin:8px 0 0; font-size:12px;">${confidence} confidence</p>
+            <div style="flex:0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+              <span class="conf-pill" style="background:${confColor(confVal)};" title="Confidence combines evidence strength in the documents, drawing/asset corroboration, and product-parameter match.">
+                <span class="conf-dot"></span>${confPct} confidence
+              </span>
+              ${lineFbControl(item)}
+              ${feedbackBtn}
             </div>
           </div>
-          <blockquote>${escapeHtml(req.evidence || "No evidence snippet returned")}</blockquote>
-          ${requirementFbControl(req, i)}
         </article>`;
       })
       .join("");
   }
 
-  // ── Per-item Requirement feedback (👍/👎 + comments) ────────────────────
+  // ── Per-item evidence feedback (👍/👎 + comments) ───────────────────────
   // Mirrors the Draft BOQ "Rate this draft" control, scoped to each evidence
-  // item. State lives on the requirement object (feedback/comments) and is
-  // persisted server-side via /requirements/{caseId}/feedback.
-  function reqFbKey(req, i) {
-    return req.feedbackKey || req.requirement_id || `IDX-${i}`;
+  // card (one per BOQ line). State lives on the line item (feedback/comments)
+  // and is persisted server-side via /requirements/{caseId}/feedback.
+  function lineFbKey(item, i) {
+    return (item && (item.feedbackKey || (item.lineNumber != null ? `L${item.lineNumber}` : null))) || `IDX-${i}`;
   }
 
-  function requirementFbControl(req, i) {
+  function lineFbControl(item) {
     if (IS_STATIC) return ""; // no backend to record feedback in the static demo
-    const key = reqFbKey(req, i);
-    const fb = req.feedback || "";
+    const key = lineFbKey(item, 0);
+    const fb = item.feedback || "";
     const upCls = fb === "Positive" ? " selected-up" : fb === "Negative" ? " dim" : "";
     const downCls = fb === "Negative" ? " selected-down" : fb === "Positive" ? " dim" : "";
     const statusTxt =
       fb === "Positive" ? "Marked helpful 👍" : fb === "Negative" ? "Feedback recorded 👎" : "";
     const statusColor = fb === "Negative" ? "var(--ralliant-orange)" : "var(--success)";
     const k = escapeHtml(String(key));
-    return `<div class="fb-group req-fb" data-fbkey="${k}" style="display:inline-flex; margin:14px 0 0;">
+    return `<div class="fb-group req-fb" data-fbkey="${k}" style="display:inline-flex; margin:0;">
       <span class="fb-label">Rate this item</span>
       <span class="fb-btns">
-        <button class="fb-btn req-fb-btn${upCls}" data-act="up" data-fbkey="${k}" type="button" title="This item looks right" aria-label="Thumbs up">👍</button>
+        <button class="fb-btn req-fb-btn${upCls}" data-act="up" data-fbkey="${k}" type="button" title="This line looks right" aria-label="Thumbs up">👍</button>
         <button class="fb-btn req-fb-btn${downCls}" data-act="down" data-fbkey="${k}" type="button" title="Not right — tell us why" aria-label="Thumbs down">👎</button>
       </span>
       <span class="fb-status req-fb-status" data-fbkey="${k}" style="color:${statusColor};">${statusTxt}</span>
     </div>`;
   }
 
-  function findRequirementByKey(key) {
-    const reqs = (currentExtraction && currentExtraction.requirements) || [];
-    for (let i = 0; i < reqs.length; i++) {
-      if (reqFbKey(reqs[i], i) === key) return { req: reqs[i], index: i };
+  function findLineByKey(key) {
+    const items = (currentExtraction && currentExtraction.lineItems) || [];
+    for (let i = 0; i < items.length; i++) {
+      if (lineFbKey(items[i], i) === key) return { item: items[i], index: i };
     }
     return null;
+  }
+
+  // Escape a value for use inside a CSS attribute selector.
+  function cssEsc(value) {
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function setReqFbState(key, feedback, opts) {
@@ -833,20 +1201,15 @@
     }
   }
 
-  // Escape a value for use inside a CSS attribute selector.
-  function cssEsc(value) {
-    return String(value).replace(/["\\]/g, "\\$&");
-  }
-
-  async function submitRequirementFeedback(key, feedback, comments) {
-    const found = findRequirementByKey(key);
+  async function submitLineFeedback(key, feedback, comments) {
+    const found = findLineByKey(key);
     if (!found) return;
     const caseId =
       currentExtraction && (currentExtraction.caseReference || currentExtraction.boqId);
     if (!caseId) return;
     // Optimistic UI.
-    found.req.feedback = feedback;
-    found.req.comments = comments || "";
+    found.item.feedback = feedback;
+    found.item.comments = comments || "";
     setReqFbState(key, feedback, { saving: true });
     try {
       const res = await fetch(
@@ -856,8 +1219,11 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             requirementId: key,
-            requirement: found.req.requirement || "",
-            scenarioId: found.req.scenario_id || found.req.productCode || "",
+            requirement:
+              (found.item.product_model || found.item.productCode || "") +
+              (found.item.description ? ` — ${found.item.description}` : ""),
+            scenarioId:
+              (found.item.technicalParams && found.item.technicalParams.scenario) || "",
             feedback,
             comments: comments || "",
           }),
@@ -865,7 +1231,8 @@
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setReqFbState(key, feedback);
-      persistRequirementFeedback();
+      persistLineFeedback();
+      updateRegenerateButton();
     } catch (err) {
       setReqFbState(key, feedback, { error: true });
     }
@@ -873,29 +1240,29 @@
 
   // Update the localStorage history snapshot so per-item feedback survives a
   // page reload / History revisit (server-side storage is the source of truth).
-  function persistRequirementFeedback() {
+  function persistLineFeedback() {
     const caseId = currentExtraction && currentExtraction.caseReference;
     if (!caseId) return;
     const list = loadHistory();
     const rec = list.find((c) => c.caseId === caseId);
     if (rec && rec.extraction) {
-      rec.extraction.requirements = currentExtraction.requirements;
+      rec.extraction.lineItems = currentExtraction.lineItems;
       writeHistory(list);
     }
   }
 
-  // ── Requirement feedback comment modal (negative feedback) ──────────────
+  // ── Feedback comment modal (negative feedback) ──────────────────────────
   let pendingReqFbKey = null;
 
   function openReqFbModal(key) {
-    const found = findRequirementByKey(key);
+    const found = findLineByKey(key);
     pendingReqFbKey = key;
     const ta = $("#req-fb-comment");
-    if (ta) ta.value = (found && found.req.comments) || "";
+    if (ta) ta.value = (found && found.item.comments) || "";
     const target = $("#req-fb-target");
     if (target) {
       target.textContent = found
-        ? `Item: ${found.req.requirement || "Untitled requirement"}`
+        ? `Item: ${found.item.product_model || found.item.productCode || "product line"}`
         : "";
     }
     const modal = $("#req-feedback-modal");
@@ -911,11 +1278,17 @@
 
   if ($("#requirements-list")) {
     $("#requirements-list").addEventListener("click", (e) => {
+      // "Feedback" button (brand-coloured): open the comment box directly.
+      const openBtn = e.target.closest(".req-fb-open");
+      if (openBtn) {
+        openReqFbModal(openBtn.dataset.fbkey);
+        return;
+      }
       const btn = e.target.closest(".req-fb-btn");
       if (!btn) return;
       const key = btn.dataset.fbkey;
       if (btn.dataset.act === "up") {
-        submitRequirementFeedback(key, "Positive", "");
+        submitLineFeedback(key, "Positive", "");
       } else {
         openReqFbModal(key);
       }
@@ -929,7 +1302,7 @@
       if (!key) return closeReqFbModal();
       const comment = ($("#req-fb-comment").value || "").trim();
       closeReqFbModal();
-      await submitRequirementFeedback(key, "Negative", comment);
+      await submitLineFeedback(key, "Negative", comment);
     });
   }
   if ($("#req-feedback-modal")) {
@@ -947,6 +1320,42 @@
     }
   });
 
+  // Reveal the evidence list (expanding it if collapsed) and scroll to the card
+  // for the clicked BOQ line, briefly highlighting it. Prefers the exact product
+  // line; falls back to all cards sharing the same scenario.
+  function jumpToEvidence(scenarioId, productId) {
+    const list = $("#requirements-list");
+    if (!list) return;
+    if (list.style.display === "none") {
+      toggleCollapsible("requirements-list", "requirements-chevron", "requirements-label");
+    }
+    const sid = (scenarioId || "").trim().toLowerCase();
+    const pid = (productId || "").trim().toLowerCase();
+    const articles = Array.from(list.querySelectorAll("article[data-scenario]"));
+    let matches = pid
+      ? articles.filter((a) => (a.dataset.product || "").trim().toLowerCase() === pid)
+      : [];
+    if (!matches.length && sid) {
+      matches = articles.filter((a) => (a.dataset.scenario || "").trim().toLowerCase() === sid);
+    }
+    const target = matches[0];
+    if (!target) {
+      // No specific evidence match — just reveal and scroll to the list.
+      list.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    // Defer to the next frame so the just-expanded list has laid out.
+    requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      matches.forEach((a) => {
+        a.classList.remove("evidence-flash");
+        void a.offsetWidth; // restart the CSS animation
+        a.classList.add("evidence-flash");
+        setTimeout(() => a.classList.remove("evidence-flash"), 2400);
+      });
+    });
+  }
+
   async function loadSampleBoq() {
     try {
       const [boq, spec] = await Promise.all([
@@ -957,11 +1366,13 @@
       // already opened (e.g. from History) while this request was in flight.
       if (currentExtraction) return;
       renderExtraction(boq);
-      $("#source-doc").textContent = spec.content;
-      $("#source-badge").textContent = spec.fileName;
+      const sourceDoc = $("#source-doc");
+      const sourceBadge = $("#source-badge");
+      if (sourceDoc) sourceDoc.textContent = spec.content;
+      if (sourceBadge) sourceBadge.textContent = spec.fileName;
     } catch (err) {
       $("#boq-table-body").innerHTML =
-        `<tr><td colspan="5" class="px-4 py-8 text-center text-red-500">Failed to load BOQ: ${err.message}</td></tr>`;
+        `<tr><td colspan="6" class="px-4 py-8 text-center text-red-500">Failed to load BOQ: ${err.message}</td></tr>`;
     }
   }
 
@@ -1147,22 +1558,33 @@
             ? "LLM Endpoint Connected"
             : "Local Rules Mode";
       }
-      $("#runtime-title").textContent = IS_STATIC
-        ? "Static demo — sample data only"
-        : llmConfigured
-          ? "LLM extraction is configured"
-          : "Local fallback extraction is active";
-      $("#runtime-copy").textContent = IS_STATIC
-        ? "This hosted demo loads sample project 00796547. Run python app.py locally to upload documents and execute the full pipeline."
-        : llmConfigured
-          ? ""
-          : "No AI endpoint/key is configured yet — uploads use deterministic local extraction. Configure an LLM key to enable full AI-powered analysis.";
-      $("#supported-types").innerHTML = Object.keys(data.supportedFileTypes || {})
-        .map((ext) => `<span class="badge bg-brand-100 text-brand-700">${ext}</span>`)
-        .join("");
+      const runtimeTitle = $("#runtime-title");
+      if (runtimeTitle) {
+        runtimeTitle.textContent = IS_STATIC
+          ? "Static demo — sample data only"
+          : llmConfigured
+            ? "LLM extraction is configured"
+            : "Local fallback extraction is active";
+      }
+      const runtimeCopy = $("#runtime-copy");
+      if (runtimeCopy) {
+        runtimeCopy.textContent = IS_STATIC
+          ? "This hosted demo loads sample project 00796547. Run python app.py locally to upload documents and execute the full pipeline."
+          : llmConfigured
+            ? ""
+            : "No AI endpoint/key is configured yet — uploads use deterministic local extraction. Configure an LLM key to enable full AI-powered analysis.";
+      }
+      const supportedTypes = $("#supported-types");
+      if (supportedTypes) {
+        supportedTypes.innerHTML = Object.keys(data.supportedFileTypes || {})
+          .map((ext) => `<span class="badge bg-brand-100 text-brand-700">${ext}</span>`)
+          .join("");
+      }
     } catch (err) {
-      $("#runtime-title").textContent = "Runtime status unavailable";
-      $("#runtime-copy").textContent = err.message;
+      const runtimeTitle = $("#runtime-title");
+      const runtimeCopy = $("#runtime-copy");
+      if (runtimeTitle) runtimeTitle.textContent = "Runtime status unavailable";
+      if (runtimeCopy) runtimeCopy.textContent = err.message;
     }
   }
 
@@ -1383,78 +1805,11 @@
   }
 
   // ── Estimated analysis time ────────────────────────────────────────────
-  // Learn a simple size→time model from past runs (each history record stores
-  // fileSizeBytes + processingTimeMs) and project it onto common file sizes.
-  // Falls back to rough defaults until enough real runs have accumulated.
-  function buildEtaModel() {
-    const runs = loadHistory()
-      .map((c) => ({
-        mb: (c.fileSizeBytes || 0) / (1024 * 1024),
-        ms: c.processingTimeMs || 0,
-      }))
-      .filter((r) => r.mb > 0 && r.ms > 0);
-
-    if (!runs.length) {
-      // No measured runs yet — rough defaults, refined once real runs land.
-      return { base: 6000, perMB: 4000, n: 0, avgMb: 0, avgMs: 0 };
-    }
-
-    const n = runs.length;
-    const avgMb = runs.reduce((s, r) => s + r.mb, 0) / n;
-    const avgMs = runs.reduce((s, r) => s + r.ms, 0) / n;
-
-    // A stable linear fit needs ≥2 differing sizes; otherwise scale
-    // proportionally through the origin off the averaged sample.
-    const distinctSizes = new Set(runs.map((r) => r.mb.toFixed(3))).size;
-    if (n >= 2 && distinctSizes >= 2) {
-      const sx = runs.reduce((s, r) => s + r.mb, 0);
-      const sy = runs.reduce((s, r) => s + r.ms, 0);
-      const sxx = runs.reduce((s, r) => s + r.mb * r.mb, 0);
-      const sxy = runs.reduce((s, r) => s + r.mb * r.ms, 0);
-      const denom = n * sxx - sx * sx;
-      let perMB = denom !== 0 ? (n * sxy - sx * sy) / denom : avgMs / avgMb;
-      let base = (sy - perMB * sx) / n;
-      if (!Number.isFinite(perMB) || perMB < 0) perMB = avgMs / avgMb;
-      if (!Number.isFinite(base) || base < 0) base = 0;
-      return { base, perMB, n, avgMb, avgMs };
-    }
-    return { base: 0, perMB: avgMs / avgMb, n, avgMb, avgMs };
-  }
-
-  function etaSecondsForMB(mb, model) {
-    return Math.max(1, (model.base + model.perMB * mb) / 1000);
-  }
-
-  // Round to a friendly, coarse label (nearest 5s, or half-minutes past 60s).
-  function etaRound(seconds) {
-    if (seconds < 60) return `${Math.max(5, Math.round(seconds / 5) * 5)}s`;
-    const mins = Math.round((seconds / 60) * 2) / 2; // nearest 0.5 min
-    return `${mins} min`;
-  }
-
-  // Cache the computed estimate so it isn't recalculated on every UI update;
-  // it only refreshes when the number of measured runs changes (i.e. a new
-  // analysis has landed).
-  let etaCache = null;
-  let etaCacheRuns = null;
-
+  // Fixed estimate (no dynamic per-file computation).
   function renderEtaEstimate() {
     const el = $("#eta-summary");
     if (!el) return;
-    const runCount = loadHistory().filter(
-      (c) => (c.fileSizeBytes || 0) > 0 && (c.processingTimeMs || 0) > 0
-    ).length;
-    if (etaCache !== null && etaCacheRuns === runCount) {
-      el.textContent = etaCache;
-      return;
-    }
-    const model = buildEtaModel();
-    const lo = etaRound(etaSecondsForMB(0.5, model)); // small file
-    const hi = etaRound(etaSecondsForMB(5, model));   // large file
-    const range = lo === hi ? `about ${lo}` : `about ${lo}–${hi}`;
-    etaCache = `Usually ${range} depending on file size. Scanned PDFs or SLD diagrams may take longer.`;
-    etaCacheRuns = runCount;
-    el.textContent = etaCache;
+    el.textContent = "Usually about 1.5–2 min. Scanned PDFs or SLD diagrams may take longer.";
   }
 
   function renderHistoryList() {

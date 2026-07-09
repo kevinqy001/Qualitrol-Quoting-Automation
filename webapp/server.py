@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -45,7 +45,7 @@ REPO_ROOT = WEBAPP_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from qualitrol_core import config, io_utils  # noqa: E402
+from qualitrol_core import config, io_utils, spec_review  # noqa: E402
 from qualitrol_core.document_parser import parse_project_folder  # noqa: E402
 from webapp.docgen import generate_quotation_docx  # noqa: E402
 
@@ -222,7 +222,7 @@ def _requirements_feedback_path(project_id: str) -> Path:
 
 
 def _load_requirements_feedback(project_id: str) -> dict:
-    """Return stored per-item requirement feedback as {key: {feedback, comments}}."""
+    """Return stored per-item BOQ-line feedback as {key: {feedback, comments}}."""
     if not project_id:
         return {}
     path = _requirements_feedback_path(project_id)
@@ -251,11 +251,9 @@ def build_extraction(
     evidence_by_id = {
         e.get("evidence_id"): e for e in step1.get("extracted_evidence", [])
     }
-
-    # Restore any per-item feedback (👍/👎 + comments) previously stored for
-    # this case, keyed by requirement_id (or IDX-<n> when no id is present), so
-    # every requirement in the output carries its own feedback/comments fields.
-    req_feedback = _load_requirements_feedback(project_id)
+    # Per-item feedback (👍/👎 + comments) is stored per case and restored onto
+    # each BOQ line so ratings survive reload/History revisits.
+    line_feedback = _load_requirements_feedback(project_id)
 
     # --- Requirement evidence list (Step 1 structured requirements) --------- #
     requirements: list[dict] = []
@@ -279,10 +277,6 @@ def build_extraction(
             or "No evidence snippet returned."
         )
 
-        # Stable per-item key used to persist/restore this item's feedback.
-        req_key = req.get("requirement_id") or f"IDX-{len(requirements)}"
-        stored_fb = req_feedback.get(req_key, {})
-
         requirements.append(
             {
                 "category": req.get("scenario") or "Requirement",
@@ -292,23 +286,6 @@ def build_extraction(
                 "technicalParams": tech_params,
                 "confidence": req.get("confidence", 0.0),
                 "evidence": evidence_text,
-                # Raw Step 1 fields preserved as context for per-item feedback
-                # (logging / traceability to the source requirement).
-                "requirement_id": req.get("requirement_id") or "",
-                "scenario": req.get("scenario") or "",
-                "scenario_id": req.get("scenario_id") or "",
-                "metric_id": req.get("metric_id") or "",
-                "metric_name": req.get("metric_name") or "",
-                "parameter_value": value,
-                "requirement_type": req.get("requirement_type") or "",
-                "asset_type": req.get("asset_type") or "",
-                "evidence_id": req.get("evidence_id") or "",
-                # Per-item feedback (mirrors the Draft BOQ "Rate this draft"
-                # feature): 👍/👎 label + optional user comment, restored from
-                # the case's stored requirements feedback.
-                "feedbackKey": req_key,
-                "feedback": stored_fb.get("feedback", ""),
-                "comments": stored_fb.get("comments", ""),
             }
         )
 
@@ -330,6 +307,9 @@ def build_extraction(
         # Use the human-readable model name as productCode when available;
         # fall back to product_id (e.g. PROD_PF_DGA_01) only if no model.
         display_code = product_model or product_id or "TBD"
+        # Stable per-line key used to persist/restore this line's feedback.
+        fb_key = f"L{boq.get('boq_line')}"
+        stored_fb = line_feedback.get(fb_key, {})
         line_items.append(
             {
                 "lineNumber": boq.get("boq_line"),
@@ -341,6 +321,15 @@ def build_extraction(
                 "unit": boq.get("unit") or "",
                 "technicalParams": tech_params,
                 "review_status": boq.get("review_status") or "",
+                "quantityBasis": boq.get("quantity_basis") or "",
+                "assumption": boq.get("assumption") or "",
+                "confidence": boq.get("confidence", 0.0),
+                "notes": boq.get("notes") or "",
+                # Per-item feedback (mirrors the Draft BOQ "Rate this draft"):
+                # 👍/👎 label + optional user comment, restored from storage.
+                "feedbackKey": fb_key,
+                "feedback": stored_fb.get("feedback", ""),
+                "comments": stored_fb.get("comments", ""),
             }
         )
 
@@ -409,10 +398,12 @@ async def _run_pipelines(
     project_id: str,
     output_dir: Path,
     sld_filenames: set[str] | None = None,
+    context_notes: str = "",
 ):
     """Run Step 1 then Step 2 off the event loop (they may call the LLM)."""
     step1 = await asyncio.to_thread(
-        step1_pipeline.run, upload_dir, project_id, output_dir, sld_filenames
+        step1_pipeline.run, upload_dir, project_id, output_dir, sld_filenames,
+        context_notes,
     )
     step1_path = output_dir / "step1_extract_info.json"
     step2 = await asyncio.to_thread(step2_pipeline.run, step1_path, output_dir)
@@ -472,11 +463,13 @@ def _build_ingest_response(step1, step2, upload_dir, saved, skipped, files_count
 
 
 async def _process_job(upload_dir, project_id, output_dir, sld_set, saved, skipped,
-                       files_count, total_bytes, first_ext, started):
+                       files_count, total_bytes, first_ext, started,
+                       context_notes=""):
     job_path, result_path = _job_paths(output_dir)
     try:
         step1, step2 = await _run_pipelines(
-            upload_dir, project_id, output_dir, sld_filenames=sld_set or None
+            upload_dir, project_id, output_dir, sld_filenames=sld_set or None,
+            context_notes=context_notes,
         )
         payload = _build_ingest_response(
             step1, step2, upload_dir, saved, skipped, files_count,
@@ -524,6 +517,7 @@ async def ingest_document(file: UploadFile = File(...)):
 async def ingest_documents(
     files: list[UploadFile] = File(...),
     sld_filenames: str = Form(""),
+    context_notes: str = Form(""),
 ):
     """Ingest uploaded files and run the full Step 1 + Step 2 pipeline on them.
 
@@ -532,6 +526,9 @@ async def ingest_documents(
         sld_filenames: JSON-encoded list of filenames that came from the SLD
             upload zone.  Those files will have their ``doc_type`` forced to
             ``"Drawing / SLD"`` regardless of filename heuristics.
+        context_notes: Free-text project context typed by the user in the Step 1
+            UI. Passed to the Step 1 LLM extraction as extra context when
+            generating requirements and evidence.
     """
     if not files:
         raise HTTPException(400, "No files uploaded.")
@@ -580,6 +577,7 @@ async def ingest_documents(
     task = asyncio.create_task(_process_job(
         upload_dir, project_id, output_dir, sld_set, saved, skipped,
         len(files), total_bytes, first_ext, started,
+        context_notes=(context_notes or "").strip(),
     ))
     _INGEST_JOBS.add(task)
     task.add_done_callback(_INGEST_JOBS.discard)
@@ -693,6 +691,188 @@ def get_sample_spec():
         else "sample_submission"
     )
     return {"fileName": file_name, "content": preview or "No sample source available."}
+
+
+# --------------------------------------------------------------------------- #
+# Spec Sections review  (spec-only requirement list, page/line, region image)
+# --------------------------------------------------------------------------- #
+def _safe_case_id(case_id: str) -> str:
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    if not safe:
+        raise HTTPException(400, "Invalid case id.")
+    return safe
+
+
+def _resolve_case(case_id: str) -> tuple[str, Path, Path, list[Path]]:
+    """Return (safe_id, step1_path, case_dir, pdf_search_dirs) for a case.
+
+    Handles both real uploaded cases (outputs/<id>/uploads/*) and the bundled
+    sample submission (its PDFs live under the sample submissions folder).
+    """
+    safe = _safe_case_id(case_id)
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    search_dirs = [case_dir / "uploads", case_dir]
+    if safe == SAMPLE_PROJECT_ID:
+        search_dirs.append(config.SAMPLE_SUBMISSIONS_DIR / SAMPLE_PROJECT_ID)
+    if not step1_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case.")
+    return safe, step1_path, case_dir, search_dirs
+
+
+@app.get("/api/v1/spec/sections/{case_id}")
+def get_spec_sections(case_id: str):
+    """Spec-document-only requirement list for the 'Review Spec Sections' modal.
+
+    Each item carries the related scenario, a short reason, its precise location
+    (document / page / line) and a region-image URL. SLD evidence is excluded.
+    """
+    safe, step1_path, _case_dir, search_dirs = _resolve_case(case_id)
+    step1 = io_utils.read_json(step1_path)
+    items = spec_review.build_sections(step1)
+    # Best-effort: refine line numbers + image availability from the source PDF.
+    try:
+        spec_review.enrich_lines(items, search_dirs)
+    except Exception:  # noqa: BLE001 - never fail the list over image lookup
+        for it in items:
+            it.setdefault("hasImage", False)
+    for it in items:
+        it["imageUrl"] = f"/api/v1/spec/region/{safe}/{it['id']}"
+    spec_docs = sorted(spec_review.spec_doc_names(step1))
+    return {"caseId": safe, "documents": spec_docs, "items": items}
+
+
+@app.get("/api/v1/spec/region/{case_id}/{evidence_id}")
+def get_spec_region(case_id: str, evidence_id: str):
+    """Cropped, highlighted screenshot of a spec requirement's source region."""
+    safe, step1_path, _case_dir, search_dirs = _resolve_case(case_id)
+    step1 = io_utils.read_json(step1_path)
+    ev = next(
+        (e for e in step1.get("extracted_evidence", [])
+         if e.get("evidence_id") == evidence_id),
+        None,
+    )
+    if not ev:
+        raise HTTPException(404, "Unknown evidence id.")
+    pdf = spec_review.find_source_pdf(ev.get("source_document", ""), search_dirs)
+    if not pdf or pdf.suffix.lower() != ".pdf":
+        raise HTTPException(404, "Source PDF not available for a region preview.")
+    png = spec_review.render_region_png(
+        pdf,
+        spec_review._page_num(ev.get("location", "")),
+        spec_review._term_from_notes(ev.get("notes", "")),
+        ev.get("evidence_text", ""),
+    )
+    if not png:
+        raise HTTPException(404, "Could not render a region preview for this item.")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "max-age=3600"})
+
+
+def _rebuild_from_spec(safe: str, payload: dict) -> dict:
+    """Regenerate the BOQ from user-edited spec requirements (+ SLD scope).
+
+    Applies the reviewer's edits/deletions to the Step 1 evidence, drops any
+    spec scenario that no longer has supporting evidence (unless it is also
+    corroborated by the SLD), then re-runs Step 2 unchanged. Does NOT modify the
+    BOQ generation logic — it only prunes/edits the Step 1 inputs and re-runs.
+    """
+    if safe == SAMPLE_PROJECT_ID:
+        raise HTTPException(
+            400,
+            "The bundled sample can't be re-analysed. Upload your own documents "
+            "to edit spec requirements and regenerate the BOQ.",
+        )
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    if not step1_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case.")
+
+    step1 = io_utils.read_json(step1_path)
+    items = payload.get("items") or []
+    deleted_ids = {i.get("id") for i in items if i.get("deleted")}
+    edits = {i.get("id"): i for i in items if i.get("id") and not i.get("deleted")}
+
+    # Scenarios that were supported by the spec BEFORE the reviewer's edits.
+    original_spec_scenarios = spec_review.spec_scenario_ids(step1)
+    sld_scenarios = spec_review.sld_scenario_ids(step1)
+
+    # Preserve the pristine Step 1 once so the original analysis is recoverable.
+    backup = case_dir / "step1_extract_info.original.json"
+    if not backup.exists():
+        try:
+            io_utils.write_json(backup, step1)
+        except Exception:
+            pass
+
+    # Apply edits + deletions to the evidence list.
+    new_evidence: list[dict] = []
+    for e in step1.get("extracted_evidence", []):
+        eid = e.get("evidence_id")
+        if eid in deleted_ids:
+            continue
+        ed = edits.get(eid)
+        if ed:
+            if ed.get("scenario"):
+                e["scenario"] = str(ed["scenario"]).strip()
+            if "assetType" in ed:
+                e["asset_type"] = str(ed.get("assetType") or "").strip()
+            if ed.get("snippet"):
+                e["evidence_text"] = str(ed["snippet"]).strip()
+            if ed.get("reason"):
+                e["notes"] = str(ed["reason"]).strip()
+        new_evidence.append(e)
+    step1["extracted_evidence"] = new_evidence
+
+    # Which spec scenarios survive the edit, and which should be dropped.
+    surviving_spec = spec_review.spec_scenario_ids(step1)
+    removed = {
+        sid for sid in original_spec_scenarios
+        if sid not in surviving_spec and sid not in sld_scenarios
+    }
+
+    if removed:
+        step1["detected_scenarios"] = [
+            d for d in step1.get("detected_scenarios", [])
+            if d.get("scenario_id") not in removed
+        ]
+        step1["structured_requirements"] = [
+            r for r in step1.get("structured_requirements", [])
+            if r.get("scenario_id") not in removed
+        ]
+
+    io_utils.write_json(step1_path, step1)
+
+    # Re-run Step 2 unchanged on the pruned/edited Step 1.
+    step2 = step2_pipeline.run(step1_path, case_dir)
+
+    uploads = case_dir / "uploads"
+    preview = _preview_for_folder(uploads) if uploads.exists() else ""
+    if not preview:
+        preview = "\n\n".join(
+            e.get("evidence_text", "") for e in step1.get("extracted_evidence", [])
+        )
+    extraction, _conf = build_extraction(
+        step1, step2, preview,
+        {"fileName": f"Case {safe}", "fileType": "revised"},
+    )
+    return {
+        "status": "regenerated",
+        "caseId": safe,
+        "removedScenarios": sorted(removed),
+        "extraction": extraction,
+    }
+
+
+@app.post("/api/v1/boq/{case_id}/rebuild-from-spec")
+async def rebuild_boq_from_spec(case_id: str, request: Request):
+    """Regenerate a case's BOQ from the reviewer-edited spec requirements."""
+    safe = _safe_case_id(case_id)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return await asyncio.to_thread(_rebuild_from_spec, safe, payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -1181,13 +1361,13 @@ async def get_feedback(case_id: str):
 
 
 # --------------------------------------------------------------------------- #
-# Per-item Requirement Evidence List feedback (👍/👎 + comments) — mirrors the
-# Draft BOQ "Rate this draft" feature, but scoped to each requirement item so
-# the whole evidence list is ML-ready and traceable to this case (history) ID.
+# Per-item Evidence List feedback (👍/👎 + comments) — mirrors the Draft BOQ
+# "Rate this draft" feature, but scoped to each BOQ line so the whole evidence
+# list is ML-ready and traceable to this case (history) ID.
 # --------------------------------------------------------------------------- #
 @app.post("/api/v1/requirements/{case_id}/feedback")
 async def submit_requirement_feedback(case_id: str, request: Request):
-    """Store 👍/👎 feedback (and optional comment) for a single requirement item."""
+    """Store 👍/👎 feedback (and optional comment) for a single BOQ line item."""
     try:
         payload = await request.json()
     except Exception as exc:
@@ -1253,10 +1433,247 @@ async def submit_requirement_feedback(case_id: str, request: Request):
 
 @app.get("/api/v1/requirements/{case_id}/feedback")
 async def get_requirement_feedback(case_id: str):
-    """Return all stored per-item requirement feedback for a case."""
+    """Return all stored per-item BOQ-line feedback for a case."""
     safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
     items = _load_requirements_feedback(safe)
     return {"exists": bool(items), "caseId": safe, "items": items}
+
+
+# --------------------------------------------------------------------------- #
+# Regenerate a BOQ using the reviewer's per-line negative feedback (LLM re-pick)
+# --------------------------------------------------------------------------- #
+def _candidate_products_for_scenario(dp, scenario_id: str, limit: int = 14) -> list[dict]:
+    """Catalog products the LLM may choose from for a scenario (deduped)."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        families = dp.families_for_scenario(scenario_id)
+    except Exception:
+        families = []
+    for fam in families:
+        for prod in dp.products_for_family(fam.family_id):
+            pid = prod.product_id
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            out.append({
+                "product_id": pid,
+                "model": prod.model,
+                "description": prod.description or fam.family_name,
+                "family_name": fam.family_name,
+            })
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _regenerate_boq_from_feedback(safe: str) -> dict:
+    """Apply per-line negative feedback to a case's BOQ via the LLM re-pick.
+
+    Returns a result dict; raises HTTPException on hard errors.
+    """
+    from qualitrol_core import llm, llm_extract, boq_excel
+    from qualitrol_core.data_package import load_data_package
+
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    step2_path = case_dir / "step2_create_boq.json"
+    if not step1_path.exists() or not step2_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case to regenerate.")
+
+    step1 = io_utils.read_json(step1_path)
+    step2 = io_utils.read_json(step2_path)
+    feedback = _load_requirements_feedback(safe)
+
+    draft = step2.get("draft_boq", [])
+    # Collect lines that were thumbed-down (with the reviewer's comment).
+    flagged: list[dict] = []
+    dp = load_data_package()
+    for line in draft:
+        key = f"L{line.get('boq_line')}"
+        fb = feedback.get(key) or {}
+        if str(fb.get("feedback", "")).strip().title() != "Negative":
+            continue
+        sid = line.get("scenario_id", "")
+        flagged.append({
+            "feedbackKey": key,
+            "product_id": line.get("product_id", ""),
+            "product_model": line.get("product_model", ""),
+            "product_description": line.get("product_description", ""),
+            "scenario_id": sid,
+            "scenario_name": _scenario_name(step1, sid),
+            "quantity": line.get("quantity"),
+            "unit": line.get("unit", ""),
+            "quantity_basis": line.get("quantity_basis", ""),
+            "feedback_comment": fb.get("comments", "") or "(no comment provided)",
+            "candidates": _candidate_products_for_scenario(dp, sid),
+        })
+
+    if not flagged:
+        raise HTTPException(
+            400, "No 👎 feedback found on any BOQ line, so there is nothing to regenerate."
+        )
+
+    client = llm.get_client()
+    if not client.available:
+        raise HTTPException(
+            400,
+            "LLM is not configured, so feedback-based product re-selection is "
+            "unavailable. Configure an LLM endpoint/key to use this feature.",
+        )
+
+    project_summary = {
+        "scenarios": [
+            {"scenario_id": d.get("scenario_id"), "name": d.get("scenario"),
+             "confidence": d.get("confidence")}
+            for d in step1.get("detected_scenarios", [])
+        ],
+    }
+    decisions = llm_extract.regenerate_boq_lines(client, project_summary, flagged)
+    if not decisions:
+        raise HTTPException(502, "The LLM did not return a usable revision. Try again.")
+
+    dec_by_key = {d["feedbackKey"]: d for d in decisions}
+    prod_by_id = {p.product_id: p for p in dp.products.values()}
+
+    revised: list[dict] = []
+    changelog: list[dict] = []
+    for line in draft:
+        key = f"L{line.get('boq_line')}"
+        dec = dec_by_key.get(key)
+        if not dec:
+            revised.append(line)
+            continue
+        action = dec["action"]
+        rationale = dec.get("rationale", "")
+        before = {"product_model": line.get("product_model"),
+                  "quantity": line.get("quantity")}
+
+        if action == "remove":
+            changelog.append({"feedbackKey": key, "action": "remove",
+                              "before": before, "after": None, "rationale": rationale})
+            continue  # drop the line
+
+        new_line = dict(line)
+        if action == "replace":
+            pid = dec.get("product_id", "")
+            valid_ids = {c["product_id"] for c in
+                         next((f["candidates"] for f in flagged if f["feedbackKey"] == key), [])}
+            if pid and pid in valid_ids:
+                prod = prod_by_id.get(pid)
+                new_line["product_id"] = pid
+                new_line["product_model"] = (prod.model if prod else dec.get("product_model")) or new_line.get("product_model")
+                if prod and prod.description:
+                    new_line["product_description"] = prod.description
+            # else: keep current product (invalid/empty pick) but still note it.
+        # Apply a corrected quantity whenever the LLM supplied one (both
+        # 'adjust' and 'replace' can carry a revised quantity).
+        if action in ("adjust", "replace") and dec.get("quantity") is not None:
+            new_line["quantity"] = dec["quantity"]
+
+        note = f"Revised from reviewer feedback ({action}): {rationale}".strip()
+        new_line["assumption"] = note
+        new_line["review_status"] = "Needs Review"
+        existing_notes = (new_line.get("notes") or "").strip()
+        new_line["notes"] = (existing_notes + " | " + note).strip(" |") if existing_notes else note
+        revised.append(new_line)
+        changelog.append({"feedbackKey": key, "action": action, "before": before,
+                          "after": {"product_model": new_line.get("product_model"),
+                                    "quantity": new_line.get("quantity")},
+                          "rationale": rationale})
+
+    # Renumber and refresh the summary.
+    for i, line in enumerate(revised, start=1):
+        line["boq_line"] = i
+    step2["draft_boq"] = revised
+    step2["boq_summary"] = {
+        "total_lines": len(revised),
+        "lines_needing_review": sum(1 for b in revised if b.get("review_status") == "Needs Review"),
+        "lines_draft_ready": sum(1 for b in revised if b.get("review_status") == "Draft"),
+    }
+    step2["feedback_revision"] = {
+        "revisedAt": _now(),
+        "changes": changelog,
+    }
+
+    # Preserve the pristine original once, then persist the revised BOQ so
+    # downstream (Excel export, Step 3 pricing, history) uses the revision.
+    original_backup = case_dir / "step2_create_boq.original.json"
+    if not original_backup.exists():
+        try:
+            io_utils.write_json(original_backup, io_utils.read_json(step2_path))
+        except Exception:
+            pass
+    io_utils.write_json(step2_path, step2)
+
+    # Append the revision to a global log for later ML/tuning.
+    try:
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        with open(FEEDBACK_DIR / "boq_regeneration_log.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"caseId": safe, "revisedAt": _now(),
+                                  "changes": changelog}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    # Consume the applied feedback so it isn't mis-attached to renumbered lines
+    # on reload (the global logs above retain it for ML/tuning).
+    fb_path = case_dir / REQUIREMENTS_FEEDBACK_FILE
+    if fb_path.exists():
+        try:
+            rec = io_utils.read_json(fb_path)
+            items = rec.get("items") if isinstance(rec, dict) else None
+            if isinstance(items, dict):
+                for f in flagged:
+                    items.pop(f["feedbackKey"], None)
+                rec["items"] = items
+                rec["updatedAt"] = _now()
+                io_utils.write_json(fb_path, rec)
+        except Exception:
+            pass
+
+    # Re-export the finished BOQ Excel (best-effort).
+    try:
+        boq_excel.generate_boq_excel(step2, case_dir / f"BOQ-{safe}.xlsx")
+    except Exception:
+        pass
+
+    # Rebuild the frontend extraction from the revised BOQ.
+    uploads = case_dir / "uploads"
+    preview = _preview_for_folder(uploads) if uploads.exists() else ""
+    if not preview:
+        preview = "\n\n".join(
+            e.get("evidence_text", "") for e in step1.get("extracted_evidence", [])
+        )
+    extraction, _conf = build_extraction(
+        step1, step2, preview, {"fileName": f"Case {safe}", "fileType": "revised"}
+    )
+    return {
+        "status": "regenerated",
+        "caseId": safe,
+        "changes": changelog,
+        "extraction": extraction,
+    }
+
+
+def _scenario_name(step1: dict, scenario_id: str) -> str:
+    for d in step1.get("detected_scenarios", []):
+        if d.get("scenario_id") == scenario_id:
+            return d.get("scenario") or scenario_id
+    return scenario_id
+
+
+@app.post("/api/v1/boq/{case_id}/regenerate")
+async def regenerate_boq(case_id: str):
+    """Regenerate a case's BOQ by applying the reviewer's per-line 👎 feedback.
+
+    Uses the LLM to remove out-of-scope lines, re-pick products from the catalog,
+    or adjust quantities based on each line's feedback comment. Persists the
+    revised BOQ (keeps the original as a backup) and re-exports the Excel.
+    """
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    if not safe:
+        raise HTTPException(400, "Invalid case id.")
+    return await asyncio.to_thread(_regenerate_boq_from_feedback, safe)
 
 
 @app.get("/api/v1/docgen/download/{doc_id}")
