@@ -815,6 +815,8 @@ def _rebuild_from_spec(safe: str, payload: dict) -> dict:
         if ed:
             if ed.get("scenario"):
                 e["scenario"] = str(ed["scenario"]).strip()
+            if "assetType" in ed:
+                e["asset_type"] = str(ed.get("assetType") or "").strip()
             if ed.get("snippet"):
                 e["evidence_text"] = str(ed["snippet"]).strip()
             if ed.get("reason"):

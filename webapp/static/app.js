@@ -695,9 +695,7 @@
         it.line ? `line ${it.line}` : "",
       ].filter(Boolean).join(" · ");
       const conf = Math.round((it.confidence || 0) * 100);
-      const assetHtml = it.assetType
-        ? `<p class="spec-asset">Asset: <strong>${escapeHtml(it.assetType)}</strong></p>`
-        : "";
+      const reasonText = (it.reason || "").trim();
       const el = document.createElement("div");
       el.className = "spec-item" + (it.deleted ? " spec-deleted" : "");
       el.dataset.idx = String(idx);
@@ -714,9 +712,10 @@
           </div>
           <div class="spec-body-l">
             <input class="spec-input" data-field="scenario" value="${escapeHtml(it.scenario || "")}" ${it.deleted ? "disabled" : ""} />
-            ${assetHtml}
+            <div class="spec-field-label">Asset</div>
+            <input class="spec-input" data-field="assetType" value="${escapeHtml(it.assetType || "")}" placeholder="—" ${it.deleted ? "disabled" : ""} />
             <div class="spec-field-label">Reason — why this is relevant</div>
-            <textarea class="spec-textarea" data-field="reason" rows="2" ${it.deleted ? "disabled" : ""}>${escapeHtml(it.reason || "")}</textarea>
+            <div class="spec-reason-text">${reasonText ? escapeHtml(reasonText) : '<span class="spec-reason-empty">—</span>'}</div>
           </div>
           <div class="spec-img-wrap" data-img-for="${escapeHtml(it.id)}">
             <div class="spec-img-empty">${it.hasImage === false ? "No preview available for this location." : "Loading preview…"}</div>
@@ -760,6 +759,7 @@
       const items = specSections.map((s) => ({
         id: s.id,
         scenario: s.scenario,
+        assetType: s.assetType,
         reason: s.reason,
         snippet: s.snippet,
         deleted: !!s.deleted,
@@ -790,6 +790,9 @@
 
   if ($("#review-spec-sections")) {
     $("#review-spec-sections").addEventListener("click", openSpecModal);
+  }
+  if ($("#boq-review-spec")) {
+    $("#boq-review-spec").addEventListener("click", openSpecModal);
   }
   if ($("#btn-spec-close")) $("#btn-spec-close").addEventListener("click", closeSpecModal);
   if ($("#btn-spec-goboq")) {

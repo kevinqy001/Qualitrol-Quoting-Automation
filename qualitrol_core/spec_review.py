@@ -131,7 +131,8 @@ def build_sections(step1: dict) -> list[dict]:
             }
         )
 
-    items.sort(key=lambda x: (x["scenario"].lower(), -x["confidence"]))
+    # Highest-confidence requirements first (ties broken by scenario name).
+    items.sort(key=lambda x: (-x["confidence"], x["scenario"].lower()))
     return items
 
 

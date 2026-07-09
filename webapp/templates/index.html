@@ -1613,7 +1613,15 @@
           <div class="card">
             <div class="card-head">
               <h3 class="section-heading">Draft BOQ — Qualitrol Product Lines</h3>
-              <span class="badge accent" id="boq-ref">-</span>
+              <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+                <button id="boq-review-spec" class="btn-secondary" type="button" title="Review the Qualitrol-relevant requirements extracted from your specification documents for this case" style="min-height:30px; padding:6px 12px; font-size:12.5px;">
+                  <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                  </svg>
+                  <span>Review Spec Sections</span>
+                </button>
+                <span class="badge accent" id="boq-ref">-</span>
+              </div>
             </div>
             <div style="overflow-x: hidden; overflow-y: auto; max-height: 480px;">
               <table>
@@ -2053,12 +2061,12 @@
     .spec-head-l, .spec-head-r { display:flex; align-items:center; min-height:24px; }
     .spec-head-l { justify-content:space-between; gap:12px; }
     .spec-body-l { min-width:0; display:flex; flex-direction:column; }
-    /* Reason box fills any leftover height so its bottom aligns with the image. */
-    .spec-body-l .spec-textarea { flex:1 1 auto; }
+    /* Reason text fills any leftover height so its bottom aligns with the image. */
+    .spec-body-l .spec-reason-text { flex:1 1 auto; }
     .spec-item:hover { box-shadow: var(--shadow); border-color:#ecdccb; }
     .spec-item.spec-deleted { opacity:.55; background:#fbf7f4; }
     .spec-item.spec-deleted .spec-input,
-    .spec-item.spec-deleted .spec-textarea { text-decoration: line-through; color:var(--muted); }
+    .spec-item.spec-deleted .spec-reason-text { text-decoration: line-through; color:var(--muted); }
     @media (max-width: 820px){ .spec-grid { grid-template-columns: 1fr; grid-template-rows:none; } }
 
     .spec-field-label {
@@ -2080,10 +2088,13 @@
       box-shadow: 0 0 0 3px rgb(180 83 9 / 0.12);
     }
 
-    .spec-asset {
-      font-size:12px; color:var(--muted); margin:6px 0 0;
+    /* Reason is read-only: shown as plain text, not an editable control. */
+    .spec-reason-text {
+      box-sizing:border-box; width:100%;
+      font-size:13px; line-height:1.5; color:var(--ink);
+      margin:0; white-space:pre-wrap; word-break:break-word;
     }
-    .spec-asset strong { color:var(--ink); font-weight:650; }
+    .spec-reason-empty { color:var(--muted); }
 
     .spec-footrow {
       display:flex; align-items:center; justify-content:space-between; gap:10px;
