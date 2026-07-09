@@ -41,7 +41,20 @@ layer locally, set the Foundry env vars (see §7) or create the gitignored
 
 ---
 
-## 3. Environments
+## 3. Environments & branching strategy
+
+**Branching model: two long-lived branches (`dev` → `main`).** This maps 1:1 to
+the two Azure environments and is deliberately simple so both people and agents
+can reason about it.
+
+- `dev` — integration branch. Deploys to the **Dev** environment.
+- `main` — **production**. Protected; deploys to **Prod** on merge.
+- `feature/*` — short-lived, branched off `dev`, deleted after merge.
+
+Why this model (not trunk-based or GitFlow): with exactly two environments and a
+small team, `dev`→`main` gives clear promotion semantics without the overhead of
+release/hotfix branches or the preview-environment tooling that pure trunk-based
+needs. Revisit if we add more environments or move to tag-based releases.
 
 | Env | Branch | App (region) | URL |
 |---|---|---|---|
@@ -56,6 +69,14 @@ Deployment is **fully automated** via GitHub Actions
 
 You do **not** run any `az`/deploy commands by hand for a normal release — git is
 the deploy trigger.
+
+### Merge gates on `main`
+A PR into `main` can only merge when **both** are satisfied:
+1. **1 approving review** (enforced for admins, stale reviews dismissed).
+2. **The `build-and-smoke` CI check passes** (`.github/workflows/ci.yml`) — it
+   installs deps, imports the app, and smoke-checks the pipeline CLIs, rules-only.
+
+This means a broken commit cannot reach Prod even if someone approves it.
 
 ---
 
