@@ -22,6 +22,7 @@ extraction / explanations on top (see qualitrol_core.llm).
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -106,6 +107,10 @@ def extract_evidence(
                 idx = matching.find_term(text_lower, syn.raw_term)
                 if idx < 0:
                     continue
+                # Skip hits the spec explicitly places out of supply scope
+                # (future expansion / optional / another party's supply).
+                if matching.in_exclusion_context(text, idx):
+                    continue
                 scenario = dp.scenarios.get(syn.scenario_id)
                 raw_hits.append(
                     Evidence(
@@ -113,6 +118,7 @@ def extract_evidence(
                         project_id=project_id,
                         source_document=doc.file_name,
                         location=seg.location,
+                        line=text[:idx].count("\n") + 1,
                         evidence_text=matching.snippet(text, idx),
                         scenario_id=syn.scenario_id,
                         scenario=scenario.application_scenario if scenario else "",
@@ -131,6 +137,10 @@ def extract_evidence(
                     idx = matching.find_term(text_lower, kw)
                     if idx < 0:
                         continue
+                    # Skip hits the spec explicitly marks as out of supply scope
+                    # (e.g. "…is not part of the scope of this description").
+                    if matching.in_exclusion_context(text, idx):
+                        continue
                     # Generic keywords (e.g. "relay") must be corroborated by a
                     # scenario-specific term in the same segment, else skip.
                     if matching.is_ambiguous_keyword(kw) and not matching.has_corroborating_term(
@@ -141,14 +151,15 @@ def extract_evidence(
                     conf = 0.45 if kw_len <= 3 else (0.52 if kw_len <= 6 else 0.6)
                     raw_hits.append(
                         Evidence(
-                            evidence_id="",
-                            project_id=project_id,
-                            source_document=doc.file_name,
-                            location=seg.location,
-                            evidence_text=matching.snippet(text, idx),
-                            scenario_id=scenario.scenario_id,
-                            scenario=scenario.application_scenario,
-                            asset_type=scenario.asset_type,
+                        evidence_id="",
+                        project_id=project_id,
+                        source_document=doc.file_name,
+                        location=seg.location,
+                        line=text[:idx].count("\n") + 1,
+                        evidence_text=matching.snippet(text, idx),
+                        scenario_id=scenario.scenario_id,
+                        scenario=scenario.application_scenario,
+                        asset_type=scenario.asset_type,
                             asset_tag="",
                             confidence=conf,
                             notes=f"Matched scenario keyword '{kw}'.",
@@ -347,6 +358,51 @@ def _requirement_type(metric, has_value: bool) -> str:
     return "Reference"
 
 
+# --------------------------------------------------------------------------- #
+# DGA gas-species detection
+# --------------------------------------------------------------------------- #
+# Controlled set of dissolved gases: (canonical, formula regex, name synonyms).
+# Both the chemical formula and the spelled-out name are accepted. CO2 is listed
+# before CO; the word-boundary regexes keep them (and O2/N2) from matching inside
+# one another (e.g. \bco\b does not match "co2").
+_DGA_GAS_TABLE = [
+    ("H2",   r"\bh2\b",   ("hydrogen",)),
+    ("CH4",  r"\bch4\b",  ("methane",)),
+    ("C2H2", r"\bc2h2\b", ("acetylene",)),
+    ("C2H4", r"\bc2h4\b", ("ethylene", "ethene")),
+    ("C2H6", r"\bc2h6\b", ("ethane",)),
+    ("CO2",  r"\bco2\b",  ("carbon dioxide",)),
+    ("CO",   r"\bco\b",   ("carbon monoxide",)),
+    ("O2",   r"\bo2\b",   ("oxygen",)),
+    ("N2",   r"\bn2\b",   ("nitrogen",)),
+]
+# Combustible "fault gases" used to size the DGA gas count (Serveron TM8=8/9,
+# TM3=3, TM1=H2). Air components O2/N2 and moisture are excluded from the count.
+_DGA_FAULT_GASES = {"H2", "CH4", "C2H2", "C2H4", "C2H6", "CO", "CO2"}
+
+
+def _detect_dga_gases(corpus_lower: str) -> list[str]:
+    """Enumerate the distinct DGA gas species mentioned anywhere in the corpus.
+
+    Matches each gas by its chemical formula (word-bounded) or spelled-out name.
+    The ambiguous bare formulas CO / O2 / N2 (which could false-match unrelated
+    text) are only accepted on a formula-only hit when at least three
+    unambiguous gases are also present, i.e. we are clearly inside a DGA gas
+    list. Returns canonical gas symbols in a stable order.
+    """
+    hits: dict[str, str] = {}
+    for canon, formula_re, names in _DGA_GAS_TABLE:
+        by_name = any(n in corpus_lower for n in names)
+        by_formula = bool(re.search(formula_re, corpus_lower))
+        if by_name or by_formula:
+            hits[canon] = "name" if by_name else "formula"
+    strong = {g for g in hits if g not in ("CO", "O2", "N2")}
+    for amb in ("CO", "O2", "N2"):
+        if hits.get(amb) == "formula" and len(strong) < 3:
+            del hits[amb]
+    return [g for g, _re, _n in _DGA_GAS_TABLE if g in hits]
+
+
 def extract_requirements(
     docs: list[ParsedDocument],
     evidence: list[Evidence],
@@ -379,6 +435,13 @@ def extract_requirements(
                 return int(asset_counts[atype]), atype
         return None, ""
 
+    # DGA gas species / count are enumerated from the full document corpus once
+    # (the metric-by-metric term search only captures the first gas, e.g. "H2").
+    corpus_lower = "\n".join(
+        seg.text for doc in docs for seg in doc.segments
+    ).lower()
+    dga_gases = _detect_dga_gases(corpus_lower)
+
     for det in detected:
         scenario = dp.scenarios.get(det["scenario_id"])
         if not scenario:
@@ -406,6 +469,22 @@ def extract_requirements(
                     )
                 else:
                     missing = "Asset count not available; raise clarification question."
+            elif mid == "MET_DGA_GAS_SPECIES" and dga_gases:
+                # Enumerate every gas mentioned, not just the first matched term.
+                value, has_value = "; ".join(dga_gases), True
+                confidence = round(min(det["confidence"], 0.8), 3)
+                missing = f"{len(dga_gases)} gas species detected in the documents."
+            elif mid == "MET_DGA_GAS_COUNT" and dga_gases:
+                # Derive the fault-gas count that drives Serveron model selection
+                # (TM8 8-9 gas / TM3 3 gas / TM1 H2 only).
+                fault = [g for g in dga_gases if g in _DGA_FAULT_GASES]
+                n = len(fault) if fault else len(dga_gases)
+                value, unit, has_value = str(n), "count", True
+                confidence = round(min(det["confidence"], 0.8), 3)
+                missing = (
+                    "Gas count inferred from species listed in the documents: "
+                    f"{', '.join(dga_gases)}."
+                )
             else:
                 found, value, unit, _src, _loc, has_value = _search_metric(metric, docs)
                 if has_value:
@@ -535,6 +614,46 @@ def _merge_requirements(rules_reqs: list[Requirement], llm_reqs: list[dict],
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+def _apply_include_directives(
+    detected: list[dict], directives: list[dict], dp: DataPackage
+) -> None:
+    """Add user-requested scenarios (``include`` directives) not already detected.
+
+    Resolves a directive's ``scenario_id`` directly, or a ``family_id`` to that
+    family's applicable scenarios. Added entries are flagged and given a
+    Needs-Review confidence so they are surfaced (and clarified) rather than
+    silently priced.
+    """
+    if not directives:
+        return
+    present = {d["scenario_id"] for d in detected}
+    for direc in directives:
+        if direc.get("type") != "include":
+            continue
+        sids: list[str] = []
+        if direc.get("scenario_id"):
+            sids.append(direc["scenario_id"])
+        elif direc.get("family_id"):
+            fam = dp.families.get(direc["family_id"])
+            if fam:
+                sids.extend(fam.applicable_scenarios)
+        for sid in sids:
+            scenario = dp.scenarios.get(sid)
+            if not scenario or sid in present:
+                continue
+            present.add(sid)
+            detected.append({
+                "scenario_id": sid,
+                "scenario": scenario.application_scenario,
+                "asset_type": scenario.asset_type,
+                "confidence": 0.5,
+                "asset_corroborated": False,
+                "evidence_count": 0,
+                "evidence_ids": [],
+                "user_requested": True,
+            })
+
+
 def _combine_instructions(extra_rules: str, context_notes: str) -> str:
     """Merge operator rule-file text with user-typed project context.
 
@@ -584,6 +703,17 @@ def run(
     evidence = extract_evidence(docs, dp, project_id)
     detected = detect_scenarios(evidence, dp, corpus_lower)
 
+    # --- Interpret the user's free-text context into structured directives that
+    #     BOTH steps can act on (exclude / include / quantity_hint / note). Kept
+    #     separate from scenario refinement so Step 2 can consume it too. ---
+    context_directives: list[dict] = []
+    if client.available and (context_notes or "").strip():
+        directives = llm_extract.interpret_context(
+            client, dp, context_notes, extra_instructions=extra_rules
+        )
+        if directives:
+            context_directives = directives
+
     # --- LLM augmentation: refine scenarios (precision) before requirements ---
     llm_used = False
     llm_dropped: list[dict] = []
@@ -594,6 +724,11 @@ def run(
         if refinement:
             llm_used = True
             detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
+
+    # Honour explicit user "include" directives: if the operator asked for a
+    # scenario the evidence did not surface, add it (flagged, Needs-Review
+    # confidence) so requirement extraction and Step 2 matching pick it up.
+    _apply_include_directives(detected, context_directives, dp)
 
     drawing_assets = extract_drawing_assets(docs, project_id, llm_client=client)
     requirements = extract_requirements(
@@ -626,6 +761,7 @@ def run(
             "sld_text_augmented_docs": sld_text_augmented,
         },
         "user_context": (context_notes or "").strip(),
+        "context_directives": context_directives,
         "documents": [
             {"file_name": d.file_name, "doc_type": d.doc_type,
              "segments": len(d.segments)}

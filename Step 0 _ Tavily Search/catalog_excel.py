@@ -16,7 +16,7 @@ _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 _FAMILY_COLS = [
-    "Product Family ID", "Product Family", "Applicable Scenario IDs",
+    "Product Line", "Product Family ID", "Product Family", "Applicable Scenario IDs",
     "Primary Asset Type", "Typical Capabilities", "Default Quantity Rule ID",
     "Dependencies / Required Inputs", "Commercial / Engineering Notes",
 ]

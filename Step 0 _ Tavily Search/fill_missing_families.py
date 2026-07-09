@@ -40,8 +40,9 @@ from qualitrol_core import config, io_utils  # noqa: E402
 
 MISSING_FAMILIES = ["PF_DFR", "PF_TR_TEMP", "PF_BUSHING", "PF_AUX_SENSOR", "PF_TWS"]
 
-# New PF_TWS row to inject into sheet 06 (all 8 columns in header order)
+# New PF_TWS row to inject into sheet 06 (all 9 columns in header order)
 PF_TWS_ROW = (
+    "CBM",
     "PF_TWS",
     "Traveling Wave Fault Locator",
     "FAULT_LOC_001",
@@ -73,8 +74,9 @@ CATALOG_JSON = config.OUTPUT_DIR / "_product_catalog" / "step0_product_catalog.j
 def _find_header_row(ws, first_col: str) -> int:
     target = first_col.strip().lower()
     for row in ws.iter_rows():
-        if row[0].value is not None and str(row[0].value).strip().lower() == target:
-            return row[0].row
+        for cell in row:
+            if cell.value is not None and str(cell.value).strip().lower() == target:
+                return cell.row
     raise ValueError(f"Header '{first_col}' not found in sheet '{ws.title}'")
 
 

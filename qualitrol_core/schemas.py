@@ -70,6 +70,7 @@ class ProductFamily:
     """Row of 06_Product_Family_Master."""
 
     family_id: str
+    product_line: str = ""
     family_name: str = ""
     applicable_scenarios: list[str] = field(default_factory=list)
     primary_asset_type: str = ""
@@ -157,6 +158,10 @@ class Evidence:
     project_id: str = ""
     source_document: str = ""
     location: str = ""
+    # 1-based line number of the matched term within its page/segment text
+    # (0 = unknown). Additive field used by the Spec Sections review UI to cite
+    # a precise "page N line M" location; does not affect BOQ generation.
+    line: int = 0
     evidence_text: str = ""
     scenario_id: str = ""
     scenario: str = ""

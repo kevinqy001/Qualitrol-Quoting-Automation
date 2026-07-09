@@ -156,6 +156,61 @@ def has_corroborating_term(
     return False
 
 
+# Phrases that explicitly place a nearby term OUT of the supply/quotation
+# scope. A scenario keyword that sits next to one of these is describing
+# something the customer says is *not* being bought now (a possible future
+# expansion, an optional capability, or another party's supply), so it must
+# not raise a scenario on its own. Kept deliberately conservative — only
+# unambiguous "out of scope / not supplied" language, NOT "optional"/"future"
+# alone (those are handled as asset scope-status in Step 2) — so genuinely
+# in-scope scenarios that merely appear near the word "future" survive.
+EXCLUSION_CUES = (
+    "not part of the scope",
+    "not part of this scope",
+    "not part of the current",
+    "not part of this contract",
+    "not part of this technical",
+    "not part of the supply",
+    "not part of scope of supply",
+    "not within the scope",
+    "not in the scope",
+    "not in scope",
+    "out of scope",
+    "outside the scope",
+    "outside of scope",
+    "not included in the scope",
+    "not included in scope",
+    "excluded from the scope",
+    "excluded from supply",
+    "excluded from this",
+    "is excluded",
+    "are excluded",
+    "shall be excluded",
+    "additional condition monitoring system is not",
+)
+
+
+def in_exclusion_context(
+    text: str, idx: int, behind: int = 160, ahead: int = 240
+) -> bool:
+    """True when the term at ``idx`` sits inside an explicit out-of-scope phrase.
+
+    Scans ``behind`` chars before and ``ahead`` chars after the match for any
+    of ``EXCLUSION_CUES``. The look-ahead is wider because specs usually state
+    the exclusion AFTER naming the item ("…Breaker Condition Monitoring system.
+    The additional condition monitoring system is not part of the scope of the
+    current technical description."). Cues are all unambiguous "not supplied /
+    out of scope" phrases, so suppressing the one evidence hit next to them is
+    safe — a genuinely in-scope scenario keeps its other (non-excluded) hits.
+    """
+    if idx < 0:
+        return False
+    start = max(0, idx - behind)
+    end = min(len(text), idx + ahead)
+    region = text[start:end].lower()
+    return any(cue in region for cue in EXCLUSION_CUES)
+
+
 def find_class_a(text_lower: str) -> bool:
     return bool(re.search(r"class\s*a\b", text_lower))
 

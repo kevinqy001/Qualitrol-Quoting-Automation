@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -45,7 +45,7 @@ REPO_ROOT = WEBAPP_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from qualitrol_core import config, io_utils  # noqa: E402
+from qualitrol_core import config, io_utils, spec_review  # noqa: E402
 from qualitrol_core.document_parser import parse_project_folder  # noqa: E402
 from webapp.docgen import generate_quotation_docx  # noqa: E402
 
@@ -691,6 +691,188 @@ def get_sample_spec():
         else "sample_submission"
     )
     return {"fileName": file_name, "content": preview or "No sample source available."}
+
+
+# --------------------------------------------------------------------------- #
+# Spec Sections review  (spec-only requirement list, page/line, region image)
+# --------------------------------------------------------------------------- #
+def _safe_case_id(case_id: str) -> str:
+    safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
+    if not safe:
+        raise HTTPException(400, "Invalid case id.")
+    return safe
+
+
+def _resolve_case(case_id: str) -> tuple[str, Path, Path, list[Path]]:
+    """Return (safe_id, step1_path, case_dir, pdf_search_dirs) for a case.
+
+    Handles both real uploaded cases (outputs/<id>/uploads/*) and the bundled
+    sample submission (its PDFs live under the sample submissions folder).
+    """
+    safe = _safe_case_id(case_id)
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    search_dirs = [case_dir / "uploads", case_dir]
+    if safe == SAMPLE_PROJECT_ID:
+        search_dirs.append(config.SAMPLE_SUBMISSIONS_DIR / SAMPLE_PROJECT_ID)
+    if not step1_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case.")
+    return safe, step1_path, case_dir, search_dirs
+
+
+@app.get("/api/v1/spec/sections/{case_id}")
+def get_spec_sections(case_id: str):
+    """Spec-document-only requirement list for the 'Review Spec Sections' modal.
+
+    Each item carries the related scenario, a short reason, its precise location
+    (document / page / line) and a region-image URL. SLD evidence is excluded.
+    """
+    safe, step1_path, _case_dir, search_dirs = _resolve_case(case_id)
+    step1 = io_utils.read_json(step1_path)
+    items = spec_review.build_sections(step1)
+    # Best-effort: refine line numbers + image availability from the source PDF.
+    try:
+        spec_review.enrich_lines(items, search_dirs)
+    except Exception:  # noqa: BLE001 - never fail the list over image lookup
+        for it in items:
+            it.setdefault("hasImage", False)
+    for it in items:
+        it["imageUrl"] = f"/api/v1/spec/region/{safe}/{it['id']}"
+    spec_docs = sorted(spec_review.spec_doc_names(step1))
+    return {"caseId": safe, "documents": spec_docs, "items": items}
+
+
+@app.get("/api/v1/spec/region/{case_id}/{evidence_id}")
+def get_spec_region(case_id: str, evidence_id: str):
+    """Cropped, highlighted screenshot of a spec requirement's source region."""
+    safe, step1_path, _case_dir, search_dirs = _resolve_case(case_id)
+    step1 = io_utils.read_json(step1_path)
+    ev = next(
+        (e for e in step1.get("extracted_evidence", [])
+         if e.get("evidence_id") == evidence_id),
+        None,
+    )
+    if not ev:
+        raise HTTPException(404, "Unknown evidence id.")
+    pdf = spec_review.find_source_pdf(ev.get("source_document", ""), search_dirs)
+    if not pdf or pdf.suffix.lower() != ".pdf":
+        raise HTTPException(404, "Source PDF not available for a region preview.")
+    png = spec_review.render_region_png(
+        pdf,
+        spec_review._page_num(ev.get("location", "")),
+        spec_review._term_from_notes(ev.get("notes", "")),
+        ev.get("evidence_text", ""),
+    )
+    if not png:
+        raise HTTPException(404, "Could not render a region preview for this item.")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "max-age=3600"})
+
+
+def _rebuild_from_spec(safe: str, payload: dict) -> dict:
+    """Regenerate the BOQ from user-edited spec requirements (+ SLD scope).
+
+    Applies the reviewer's edits/deletions to the Step 1 evidence, drops any
+    spec scenario that no longer has supporting evidence (unless it is also
+    corroborated by the SLD), then re-runs Step 2 unchanged. Does NOT modify the
+    BOQ generation logic — it only prunes/edits the Step 1 inputs and re-runs.
+    """
+    if safe == SAMPLE_PROJECT_ID:
+        raise HTTPException(
+            400,
+            "The bundled sample can't be re-analysed. Upload your own documents "
+            "to edit spec requirements and regenerate the BOQ.",
+        )
+    case_dir = config.OUTPUT_DIR / safe
+    step1_path = case_dir / "step1_extract_info.json"
+    if not step1_path.exists():
+        raise HTTPException(404, "No stored analysis found for this case.")
+
+    step1 = io_utils.read_json(step1_path)
+    items = payload.get("items") or []
+    deleted_ids = {i.get("id") for i in items if i.get("deleted")}
+    edits = {i.get("id"): i for i in items if i.get("id") and not i.get("deleted")}
+
+    # Scenarios that were supported by the spec BEFORE the reviewer's edits.
+    original_spec_scenarios = spec_review.spec_scenario_ids(step1)
+    sld_scenarios = spec_review.sld_scenario_ids(step1)
+
+    # Preserve the pristine Step 1 once so the original analysis is recoverable.
+    backup = case_dir / "step1_extract_info.original.json"
+    if not backup.exists():
+        try:
+            io_utils.write_json(backup, step1)
+        except Exception:
+            pass
+
+    # Apply edits + deletions to the evidence list.
+    new_evidence: list[dict] = []
+    for e in step1.get("extracted_evidence", []):
+        eid = e.get("evidence_id")
+        if eid in deleted_ids:
+            continue
+        ed = edits.get(eid)
+        if ed:
+            if ed.get("scenario"):
+                e["scenario"] = str(ed["scenario"]).strip()
+            if "assetType" in ed:
+                e["asset_type"] = str(ed.get("assetType") or "").strip()
+            if ed.get("snippet"):
+                e["evidence_text"] = str(ed["snippet"]).strip()
+            if ed.get("reason"):
+                e["notes"] = str(ed["reason"]).strip()
+        new_evidence.append(e)
+    step1["extracted_evidence"] = new_evidence
+
+    # Which spec scenarios survive the edit, and which should be dropped.
+    surviving_spec = spec_review.spec_scenario_ids(step1)
+    removed = {
+        sid for sid in original_spec_scenarios
+        if sid not in surviving_spec and sid not in sld_scenarios
+    }
+
+    if removed:
+        step1["detected_scenarios"] = [
+            d for d in step1.get("detected_scenarios", [])
+            if d.get("scenario_id") not in removed
+        ]
+        step1["structured_requirements"] = [
+            r for r in step1.get("structured_requirements", [])
+            if r.get("scenario_id") not in removed
+        ]
+
+    io_utils.write_json(step1_path, step1)
+
+    # Re-run Step 2 unchanged on the pruned/edited Step 1.
+    step2 = step2_pipeline.run(step1_path, case_dir)
+
+    uploads = case_dir / "uploads"
+    preview = _preview_for_folder(uploads) if uploads.exists() else ""
+    if not preview:
+        preview = "\n\n".join(
+            e.get("evidence_text", "") for e in step1.get("extracted_evidence", [])
+        )
+    extraction, _conf = build_extraction(
+        step1, step2, preview,
+        {"fileName": f"Case {safe}", "fileType": "revised"},
+    )
+    return {
+        "status": "regenerated",
+        "caseId": safe,
+        "removedScenarios": sorted(removed),
+        "extraction": extraction,
+    }
+
+
+@app.post("/api/v1/boq/{case_id}/rebuild-from-spec")
+async def rebuild_boq_from_spec(case_id: str, request: Request):
+    """Regenerate a case's BOQ from the reviewer-edited spec requirements."""
+    safe = _safe_case_id(case_id)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return await asyncio.to_thread(_rebuild_from_spec, safe, payload)
 
 
 # --------------------------------------------------------------------------- #

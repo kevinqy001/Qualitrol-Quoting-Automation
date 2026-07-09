@@ -21,6 +21,21 @@ COUNT_FIELD_TO_METRIC = {
     "pcc_count": "MET_ASSET_COUNT",
     "measurement_point_count": "MET_ASSET_COUNT",
     "accessory_count": "MET_SENSOR_COUNT",
+    # GIS gas-zone assets (2026-07 DMS GIS SLD diagram review).
+    "gas_zone_count": "MET_ASSET_COUNT",
+    "compartment_count": "MET_ASSET_COUNT",
+    "disconnector_count": "MET_ASSET_COUNT",
+    "earthing_switch_count": "MET_ASSET_COUNT",
+    # Transformer CBM (2026-07 CBM KB scan). CBM projects have no SLD at BOQ:
+    # these counts come from the monitored-parameter list in the project
+    # document (not a drawing), so they resolve via the metric path only.
+    "analog_input_count": "MET_ANALOG_INPUT_COUNT",
+    "rtd_count": "MET_RTD_COUNT",
+    "digital_input_count": "MET_DIGITAL_INPUT_COUNT",
+    "fo_channel_count": "MET_FO_CHANNEL_COUNT",
+    "relay_output_count": "MET_RELAY_OUTPUT_COUNT",
+    "dga_gas_count": "MET_DGA_GAS_COUNT",
+    "tap_changer_count": "MET_TAP_POSITION",
 }
 
 # Quantity-rule count field -> drawing asset type(s) (from 14_Drawing_Asset_List).
@@ -31,7 +46,7 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "panel_count": ["Switchgear Panel", "Switchgear"],
     "generator_count": ["Generator"],
     "motor_count": ["Motor"],
-    "sensor_count": ["Sensor", "PD Sensor"],
+    "sensor_count": ["Sensor", "PD Sensor", "Gas Density Sensor"],
     "bushing_count": ["Bushing"],
     "accessory_count": ["Accessory", "Sensor"],
     # Feeders are the primary sizing basis for DFR/PMU/PQ recorders (1 DAU per
@@ -50,6 +65,14 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "tap_changer_count": ["Tap Changer"],
     "capacitor_bank_count": ["Capacitor Bank"],
     "cabinet_count": ["Cabinet"],
+    # GIS gas-zone assets (from 2026-07 DMS GIS SLD diagram review). A monitored
+    # gas zone / compartment drives one WIKA GDHT-20 gas-density sensor
+    # (GIS_SF6_001 / QR_SF6_SNS = 1 sensor per zone); disconnector / earthing
+    # switch zones inform the UHF protector recommendation.
+    "gas_zone_count": ["Gas Compartment", "Gas Density Sensor"],
+    "compartment_count": ["Gas Compartment"],
+    "disconnector_count": ["Disconnector Switch"],
+    "earthing_switch_count": ["Earthing Switch"],
 }
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +107,13 @@ MEA_DAUS_PER_GPS_MASTER = 12       # CR_MEA_06: 1 GPS master per 12 DAU
 MEA_ANTENNAS_PER_MASTER = 2        # CR_MEA_06: 2 antennas per master
 MEA_EPG_LICENSES_PER_PMU = 4       # CR_MEA_08: 4 EPG licences per PMU device
 MEA_DEVICES_PER_PANEL = 4          # CR_MEA_05: max 4x 3U (or 2x 6U) per panel
+
+# DAY-2 user feedback (cases 766481 / 775368 / 776060): on the AI draft BOQ the
+# engineering services & spares belong in the General notes, NOT as priced line
+# items; and the GPS 2-Way splitter is consistently "not required" (one antenna
+# per master). These toggles keep those items out of the auto-generated draft.
+MEA_INCLUDE_SERVICES = False
+MEA_INCLUDE_GPS_SPLITTER = False
 
 # Families that are emitted by the MEA expansion pass (accessories / panels /
 # network / timing / software / services), NOT by the generic per-family

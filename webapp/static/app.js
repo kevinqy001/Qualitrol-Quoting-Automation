@@ -625,6 +625,207 @@
     });
   }
 
+  // ── Review Spec Sections modal ─────────────────────────────────────────
+  // Spec-document-only requirement list. The reviewer can edit/delete items and
+  // then "Start New Analysis" to regenerate the BOQ from the edited spec scope
+  // (plus SLD-derived scope). "Review Draft BOQ" jumps to the review tab.
+  const specModal = $("#spec-modal");
+  let specSections = [];   // working copy: [{...item, deleted}]
+  let specCaseId = null;
+
+  async function openSpecModal() {
+    if (IS_STATIC) {
+      alert("Spec section review isn't available in the static demo.");
+      return;
+    }
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (!caseId) {
+      alert("Run an analysis (or load the sample) first.");
+      return;
+    }
+    specCaseId = caseId;
+    if (specModal) specModal.classList.remove("hidden");
+    $("#spec-list").innerHTML = "";
+    $("#spec-count").textContent = "Loading…";
+    $("#spec-docs").textContent = "";
+    $("#spec-foot-status").textContent = "";
+    try {
+      const res = await fetch(`${API}/spec/sections/${encodeURIComponent(caseId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      specSections = (data.items || []).map((it) => ({ ...it, deleted: false }));
+      $("#spec-docs").textContent = (data.documents || []).length
+        ? "Source: " + data.documents.join(", ")
+        : "";
+      renderSpecSections();
+    } catch (err) {
+      $("#spec-list").innerHTML =
+        `<div class="spec-empty">Couldn't load spec sections: ${escapeHtml(err.message)}</div>`;
+      $("#spec-count").textContent = "";
+    }
+  }
+
+  // Same colour ramp as the Requirement Review confidence pills:
+  // ~60%→red, ~70%→orange, ~80%→yellow, ~100%→green (below 60% clamps to red).
+  function specConfColor(v) {
+    if (v == null) return "#9aa0a6";
+    const t = Math.max(0, Math.min(1, (v - 0.6) / 0.4));
+    return `hsl(${Math.round(t * 120)}, 70%, 42%)`;
+  }
+
+  function renderSpecSections() {
+    const list = $("#spec-list");
+    if (!list) return;
+    const active = specSections.filter((s) => !s.deleted);
+    const removed = specSections.length - active.length;
+    $("#spec-count").textContent = specSections.length
+      ? `${active.length} requirement${active.length !== 1 ? "s" : ""}` +
+        (removed ? ` · ${removed} removed` : "")
+      : "No spec-derived requirements found.";
+    if (!specSections.length) {
+      list.innerHTML =
+        `<div class="spec-empty">No requirements were extracted from specification documents (this may be an SLD-only submission, or nothing matched).</div>`;
+      return;
+    }
+    list.innerHTML = "";
+    specSections.forEach((it, idx) => {
+      const loc = [
+        it.document || "",
+        it.page ? `page ${it.page}` : "",
+        it.line ? `line ${it.line}` : "",
+      ].filter(Boolean).join(" · ");
+      const conf = Math.round((it.confidence || 0) * 100);
+      const reasonText = (it.reason || "").trim();
+      const el = document.createElement("div");
+      el.className = "spec-item" + (it.deleted ? " spec-deleted" : "");
+      el.dataset.idx = String(idx);
+      el.innerHTML = `
+        <div class="spec-grid">
+          <div class="spec-head-l">
+            <span class="spec-field-label">Scenario</span>
+            <span class="conf-pill" style="background:${specConfColor(it.confidence)};" title="Detection confidence for this requirement's scenario.">
+              <span class="conf-dot"></span>${conf}% confidence
+            </span>
+          </div>
+          <div class="spec-head-r">
+            <span class="spec-field-label">Source region</span>
+          </div>
+          <div class="spec-body-l">
+            <input class="spec-input" data-field="scenario" value="${escapeHtml(it.scenario || "")}" ${it.deleted ? "disabled" : ""} />
+            <div class="spec-field-label">Asset</div>
+            <input class="spec-input" data-field="assetType" value="${escapeHtml(it.assetType || "")}" placeholder="—" ${it.deleted ? "disabled" : ""} />
+            <div class="spec-field-label">Reason — why this is relevant</div>
+            <div class="spec-reason-text">${reasonText ? escapeHtml(reasonText) : '<span class="spec-reason-empty">—</span>'}</div>
+          </div>
+          <div class="spec-img-wrap" data-img-for="${escapeHtml(it.id)}">
+            <div class="spec-img-empty">${it.hasImage === false ? "No preview available for this location." : "Loading preview…"}</div>
+          </div>
+        </div>
+        <div class="spec-footrow">
+          <span class="spec-loc" title="Location in the source document">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"/></svg>
+            <span class="spec-loc-text">${escapeHtml(loc || "Location unavailable")}</span>
+          </span>
+          <button type="button" class="spec-del-btn" data-action="${it.deleted ? "restore" : "delete"}">${it.deleted ? "Restore" : "Delete"}</button>
+        </div>`;
+      list.appendChild(el);
+
+      if (it.hasImage !== false && it.imageUrl) {
+        const wrap = el.querySelector("[data-img-for]");
+        const img = new Image();
+        img.alt = "Source region for " + (it.scenario || "requirement");
+        img.onload = () => { wrap.innerHTML = ""; wrap.appendChild(img); };
+        img.onerror = () => {
+          wrap.innerHTML = `<div class="spec-img-empty">No preview available.</div>`;
+        };
+        img.addEventListener("click", () => window.open(it.imageUrl, "_blank"));
+        img.src = it.imageUrl;
+      }
+    });
+  }
+
+  function closeSpecModal() {
+    if (specModal) specModal.classList.add("hidden");
+  }
+
+  async function specStartAnalysis() {
+    if (IS_STATIC || !specCaseId) return;
+    const btn = $("#btn-spec-analyze");
+    const orig = btn ? btn.innerHTML : "";
+    if (btn) { btn.disabled = true; btn.innerHTML = "<span>Regenerating…</span>"; }
+    $("#spec-foot-status").textContent =
+      "Regenerating the BOQ from your edited spec requirements…";
+    try {
+      const items = specSections.map((s) => ({
+        id: s.id,
+        scenario: s.scenario,
+        assetType: s.assetType,
+        reason: s.reason,
+        snippet: s.snippet,
+        deleted: !!s.deleted,
+      }));
+      const res = await fetch(
+        `${API}/boq/${encodeURIComponent(specCaseId)}/rebuild-from-spec`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }) }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      if (data.extraction) {
+        renderExtraction(data.extraction);
+        const list = loadHistory();
+        const rec = list.find((c) => c.caseId === (data.caseId || specCaseId));
+        if (rec) { rec.extraction = data.extraction; writeHistory(list); }
+      }
+      const removed = (data.removedScenarios || []).length;
+      $("#spec-foot-status").textContent =
+        `BOQ regenerated${removed ? ` · ${removed} scenario(s) removed from scope` : ""}. Click “Review Draft BOQ” to view it.`;
+    } catch (err) {
+      $("#spec-foot-status").textContent = "";
+      alert("Couldn't regenerate the BOQ: " + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    }
+  }
+
+  if ($("#review-spec-sections")) {
+    $("#review-spec-sections").addEventListener("click", openSpecModal);
+  }
+  if ($("#boq-review-spec")) {
+    $("#boq-review-spec").addEventListener("click", openSpecModal);
+  }
+  if ($("#btn-spec-close")) $("#btn-spec-close").addEventListener("click", closeSpecModal);
+  if ($("#btn-spec-goboq")) {
+    $("#btn-spec-goboq").addEventListener("click", () => { closeSpecModal(); switchTab("boq"); });
+  }
+  if ($("#btn-spec-analyze")) {
+    $("#btn-spec-analyze").addEventListener("click", specStartAnalysis);
+  }
+  if (specModal) {
+    specModal.addEventListener("click", (e) => { if (e.target === specModal) closeSpecModal(); });
+    $("#spec-list").addEventListener("input", (e) => {
+      const row = e.target.closest(".spec-item");
+      if (!row) return;
+      const idx = Number(row.dataset.idx);
+      const field = e.target.dataset.field;
+      if (field && specSections[idx]) specSections[idx][field] = e.target.value;
+    });
+    $("#spec-list").addEventListener("click", (e) => {
+      const actBtn = e.target.closest("[data-action]");
+      if (!actBtn) return;
+      const row = e.target.closest(".spec-item");
+      const idx = Number(row.dataset.idx);
+      if (!specSections[idx]) return;
+      specSections[idx].deleted = actBtn.dataset.action === "delete";
+      renderSpecSections();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && specModal && !specModal.classList.contains("hidden")) {
+      closeSpecModal();
+    }
+  });
+
   const renderBoq = renderExtraction;
 
   // ── BOQ feedback (thumbs up/down + comments), linked to the case/history ID ──
