@@ -22,6 +22,7 @@ extraction / explanations on top (see qualitrol_core.llm).
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -357,6 +358,51 @@ def _requirement_type(metric, has_value: bool) -> str:
     return "Reference"
 
 
+# --------------------------------------------------------------------------- #
+# DGA gas-species detection
+# --------------------------------------------------------------------------- #
+# Controlled set of dissolved gases: (canonical, formula regex, name synonyms).
+# Both the chemical formula and the spelled-out name are accepted. CO2 is listed
+# before CO; the word-boundary regexes keep them (and O2/N2) from matching inside
+# one another (e.g. \bco\b does not match "co2").
+_DGA_GAS_TABLE = [
+    ("H2",   r"\bh2\b",   ("hydrogen",)),
+    ("CH4",  r"\bch4\b",  ("methane",)),
+    ("C2H2", r"\bc2h2\b", ("acetylene",)),
+    ("C2H4", r"\bc2h4\b", ("ethylene", "ethene")),
+    ("C2H6", r"\bc2h6\b", ("ethane",)),
+    ("CO2",  r"\bco2\b",  ("carbon dioxide",)),
+    ("CO",   r"\bco\b",   ("carbon monoxide",)),
+    ("O2",   r"\bo2\b",   ("oxygen",)),
+    ("N2",   r"\bn2\b",   ("nitrogen",)),
+]
+# Combustible "fault gases" used to size the DGA gas count (Serveron TM8=8/9,
+# TM3=3, TM1=H2). Air components O2/N2 and moisture are excluded from the count.
+_DGA_FAULT_GASES = {"H2", "CH4", "C2H2", "C2H4", "C2H6", "CO", "CO2"}
+
+
+def _detect_dga_gases(corpus_lower: str) -> list[str]:
+    """Enumerate the distinct DGA gas species mentioned anywhere in the corpus.
+
+    Matches each gas by its chemical formula (word-bounded) or spelled-out name.
+    The ambiguous bare formulas CO / O2 / N2 (which could false-match unrelated
+    text) are only accepted on a formula-only hit when at least three
+    unambiguous gases are also present, i.e. we are clearly inside a DGA gas
+    list. Returns canonical gas symbols in a stable order.
+    """
+    hits: dict[str, str] = {}
+    for canon, formula_re, names in _DGA_GAS_TABLE:
+        by_name = any(n in corpus_lower for n in names)
+        by_formula = bool(re.search(formula_re, corpus_lower))
+        if by_name or by_formula:
+            hits[canon] = "name" if by_name else "formula"
+    strong = {g for g in hits if g not in ("CO", "O2", "N2")}
+    for amb in ("CO", "O2", "N2"):
+        if hits.get(amb) == "formula" and len(strong) < 3:
+            del hits[amb]
+    return [g for g, _re, _n in _DGA_GAS_TABLE if g in hits]
+
+
 def extract_requirements(
     docs: list[ParsedDocument],
     evidence: list[Evidence],
@@ -389,6 +435,13 @@ def extract_requirements(
                 return int(asset_counts[atype]), atype
         return None, ""
 
+    # DGA gas species / count are enumerated from the full document corpus once
+    # (the metric-by-metric term search only captures the first gas, e.g. "H2").
+    corpus_lower = "\n".join(
+        seg.text for doc in docs for seg in doc.segments
+    ).lower()
+    dga_gases = _detect_dga_gases(corpus_lower)
+
     for det in detected:
         scenario = dp.scenarios.get(det["scenario_id"])
         if not scenario:
@@ -416,6 +469,22 @@ def extract_requirements(
                     )
                 else:
                     missing = "Asset count not available; raise clarification question."
+            elif mid == "MET_DGA_GAS_SPECIES" and dga_gases:
+                # Enumerate every gas mentioned, not just the first matched term.
+                value, has_value = "; ".join(dga_gases), True
+                confidence = round(min(det["confidence"], 0.8), 3)
+                missing = f"{len(dga_gases)} gas species detected in the documents."
+            elif mid == "MET_DGA_GAS_COUNT" and dga_gases:
+                # Derive the fault-gas count that drives Serveron model selection
+                # (TM8 8-9 gas / TM3 3 gas / TM1 H2 only).
+                fault = [g for g in dga_gases if g in _DGA_FAULT_GASES]
+                n = len(fault) if fault else len(dga_gases)
+                value, unit, has_value = str(n), "count", True
+                confidence = round(min(det["confidence"], 0.8), 3)
+                missing = (
+                    "Gas count inferred from species listed in the documents: "
+                    f"{', '.join(dga_gases)}."
+                )
             else:
                 found, value, unit, _src, _loc, has_value = _search_metric(metric, docs)
                 if has_value:

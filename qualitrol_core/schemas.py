@@ -70,6 +70,7 @@ class ProductFamily:
     """Row of 06_Product_Family_Master."""
 
     family_id: str
+    product_line: str = ""
     family_name: str = ""
     applicable_scenarios: list[str] = field(default_factory=list)
     primary_asset_type: str = ""

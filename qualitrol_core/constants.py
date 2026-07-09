@@ -26,6 +26,16 @@ COUNT_FIELD_TO_METRIC = {
     "compartment_count": "MET_ASSET_COUNT",
     "disconnector_count": "MET_ASSET_COUNT",
     "earthing_switch_count": "MET_ASSET_COUNT",
+    # Transformer CBM (2026-07 CBM KB scan). CBM projects have no SLD at BOQ:
+    # these counts come from the monitored-parameter list in the project
+    # document (not a drawing), so they resolve via the metric path only.
+    "analog_input_count": "MET_ANALOG_INPUT_COUNT",
+    "rtd_count": "MET_RTD_COUNT",
+    "digital_input_count": "MET_DIGITAL_INPUT_COUNT",
+    "fo_channel_count": "MET_FO_CHANNEL_COUNT",
+    "relay_output_count": "MET_RELAY_OUTPUT_COUNT",
+    "dga_gas_count": "MET_DGA_GAS_COUNT",
+    "tap_changer_count": "MET_TAP_POSITION",
 }
 
 # Quantity-rule count field -> drawing asset type(s) (from 14_Drawing_Asset_List).
@@ -97,6 +107,13 @@ MEA_DAUS_PER_GPS_MASTER = 12       # CR_MEA_06: 1 GPS master per 12 DAU
 MEA_ANTENNAS_PER_MASTER = 2        # CR_MEA_06: 2 antennas per master
 MEA_EPG_LICENSES_PER_PMU = 4       # CR_MEA_08: 4 EPG licences per PMU device
 MEA_DEVICES_PER_PANEL = 4          # CR_MEA_05: max 4x 3U (or 2x 6U) per panel
+
+# DAY-2 user feedback (cases 766481 / 775368 / 776060): on the AI draft BOQ the
+# engineering services & spares belong in the General notes, NOT as priced line
+# items; and the GPS 2-Way splitter is consistently "not required" (one antenna
+# per master). These toggles keep those items out of the auto-generated draft.
+MEA_INCLUDE_SERVICES = False
+MEA_INCLUDE_GPS_SPLITTER = False
 
 # Families that are emitted by the MEA expansion pass (accessories / panels /
 # network / timing / software / services), NOT by the generic per-family

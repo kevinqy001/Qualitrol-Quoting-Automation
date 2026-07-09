@@ -26,12 +26,16 @@ FIRSTCOL = {
 
 
 def header_of(ws, first_col):
+    target = first_col.strip()
     for row in ws.iter_rows(values_only=True):
-        if row and row[0] is not None and str(row[0]).strip() == first_col:
-            hdr = [("" if c is None else str(c)) for c in row]
-            while hdr and hdr[-1] == "":
-                hdr.pop()
-            return hdr
+        if not row:
+            continue
+        for cell in row:
+            if cell is not None and str(cell).strip() == target:
+                hdr = [("" if c is None else str(c)) for c in row]
+                while hdr and hdr[-1] == "":
+                    hdr.pop()
+                return hdr
     raise ValueError(f"header {first_col} not found in {ws.title}")
 
 
@@ -86,7 +90,7 @@ METRICS = [
 ]
 
 FAMILIES = [
-    {"Product Family ID": "PF_OLTC", "Product Family": "OLTC / Tap Changer Monitor",
+    {"Product Line": "CBM", "Product Family ID": "PF_OLTC", "Product Family": "OLTC / Tap Changer Monitor",
      "Applicable Scenario IDs": "TAPCHG_001", "Primary Asset Type": "On-load tap changer",
      "Typical Capabilities": "Tap position, drive-motor current, operating/switching time, contact wear, OLTC oil temperature; often delivered as a QTMS LTC/AI module.",
      "Default Quantity Rule ID": "QR_OLTC_001",
