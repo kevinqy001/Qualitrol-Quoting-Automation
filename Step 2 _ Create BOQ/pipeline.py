@@ -58,6 +58,217 @@ def _load_step1(step1_path: Path) -> dict:
 _EXCLUDED_SCOPE_STATUSES = {"Future", "Provision"}
 
 
+# --------------------------------------------------------------------------- #
+# User scope-exclusion filter
+# --------------------------------------------------------------------------- #
+# Free-text project context (e.g. "do not include trainings, service etc. in
+# current draft scope") lets the engineer drop whole auto-added CATEGORIES from
+# the draft BOQ. These service / training / spares / commissioning lines are
+# added deterministically (base BOQ + MEA expansion) and are NOT scenario-
+# driven, so the Step 1 LLM prompt cannot remove them — they are filtered here,
+# where the BOQ lines actually exist. The user_context is carried in the Step 1
+# output JSON, so no extra plumbing from the web layer is required.
+_EXCLUSION_CUES = (
+    "do not include", "don't include", "dont include", "do not add",
+    "exclude", "excluding", "without", "omit", "drop ", "remove ",
+    "not in scope", "out of scope", "not required", "no need",
+)
+# category -> (trigger words in the user's text, family ids to drop,
+#              model/description substring hints to drop)
+_SCOPE_CATEGORIES = {
+    "service": {
+        "triggers": ("service", "services"),
+        "families": {"PF_SERVICES", "PF_COMMON"},
+        # NOTE: no bare "service" substring here — it false-matches software whose
+        # description happens to contain the word (e.g. "3yr subscription service").
+        # The PF_SERVICES / PF_COMMON family match covers the real service lines.
+        "hints": (
+            "commissioning", "mobilis", "factory fat", "factory acceptance",
+            "testing & commissioning", "energisation", "cybersecurity",
+            "communication establishment",
+        ),
+    },
+    "training": {"triggers": ("training", "trainings"), "families": set(),
+                 "hints": ("training",)},
+    "commissioning": {"triggers": ("commissioning",), "families": set(),
+                      "hints": ("commissioning", "mobilis")},
+    "spares": {"triggers": ("spare", "spares"), "families": set(),
+               "hints": ("spare",)},
+    "fat": {"triggers": ("fat", "factory acceptance"), "families": set(),
+            "hints": ("factory fat", "factory acceptance")},
+    "software": {"triggers": ("software", "licence", "license"),
+                 "families": {"PF_SW_LIC"},
+                 "hints": ("antivirus", "whitelisting", "backup software", "espdc")},
+    "network": {"triggers": ("network", "switch", "firewall"),
+                "families": {"PF_NET_SEC"}, "hints": ("l2 switch", "l3 switch", "firewall")},
+    "timing": {"triggers": ("gps", "timing"), "families": {"PF_TIMING"},
+               "hints": ("gps antenna", "gps splitter")},
+    "panel": {"triggers": ("panel", "cubicle", "cabinet"),
+              "families": {"PF_MON_PANEL"}, "hints": ("cubicle", "fms panel")},
+}
+
+
+def _parse_scope_exclusions(user_context: str) -> set[str]:
+    """Return the set of BOQ categories the user asked to exclude.
+
+    Requires BOTH an exclusion cue (e.g. "do not include", "exclude",
+    "without") and a category trigger word (e.g. "training", "service") to be
+    present in the context text, so ordinary mentions don't trigger a drop.
+    """
+    text = (user_context or "").lower()
+    if not text or not any(cue in text for cue in _EXCLUSION_CUES):
+        return set()
+    excluded: set[str] = set()
+    for category, spec in _SCOPE_CATEGORIES.items():
+        if any(trig in text for trig in spec["triggers"]):
+            excluded.add(category)
+    return excluded
+
+
+def _line_in_excluded_category(line: BOQLine, categories: set[str]) -> bool:
+    fid = (line.family_id or "") if hasattr(line, "family_id") else ""
+    blob = " ".join([
+        getattr(line, "product_model", "") or "",
+        getattr(line, "product_description", "") or "",
+        getattr(line, "quantity_basis", "") or "",
+    ]).lower()
+    for category in categories:
+        spec = _SCOPE_CATEGORIES[category]
+        if fid and fid in spec["families"]:
+            return True
+        if any(hint in blob for hint in spec["hints"]):
+            return True
+    return False
+
+
+def _apply_scope_exclusions(
+    boq: list[BOQLine], excluded_categories: set[str]
+) -> list[dict]:
+    """Drop BOQ lines matching excluded categories; return the dropped lines.
+
+    Mutates ``boq`` in place and renumbers the surviving lines.
+    """
+    if not excluded_categories:
+        return []
+    dropped: list[dict] = []
+    kept: list[BOQLine] = []
+    for line in boq:
+        if _line_in_excluded_category(line, excluded_categories):
+            dropped.append({
+                "product_model": line.product_model,
+                "product_description": line.product_description,
+                "family_id": getattr(line, "family_id", ""),
+            })
+        else:
+            kept.append(line)
+    if dropped:
+        boq[:] = kept
+        for i, line in enumerate(boq, start=1):
+            line.boq_line = i
+    return dropped
+
+
+def _exclusion_spec_from_directives(directives: list[dict]) -> tuple[set, set, set]:
+    """Return (categories, family_ids, scenario_ids) from ``exclude`` directives."""
+    cats, fams, scens = set(), set(), set()
+    for d in directives or []:
+        if d.get("type") != "exclude":
+            continue
+        if d.get("category"):
+            cats.add(d["category"])
+        if d.get("family_id"):
+            fams.add(d["family_id"])
+        if d.get("scenario_id"):
+            scens.add(d["scenario_id"])
+    return cats, fams, scens
+
+
+def _apply_context_exclusions(
+    boq: list[BOQLine], directives: list[dict], dp: DataPackage, fallback_context: str
+) -> tuple[list[dict], dict]:
+    """Drop BOQ lines per structured exclude directives (or, when none are
+    available, a deterministic keyword parse of the raw context).
+
+    Matching is by: excluded category (family set + description hints), excluded
+    family_id (resolved via the line's product), or excluded scenario_id.
+    Returns (dropped_lines, applied_summary).
+    """
+    cats, fam_ids, scen_ids = _exclusion_spec_from_directives(directives)
+    used_fallback = False
+    if not (cats or fam_ids or scen_ids):
+        cats = _parse_scope_exclusions(fallback_context)
+        used_fallback = bool(cats)
+    if not (cats or fam_ids or scen_ids):
+        return [], {}
+
+    # Expand category-mapped families into the family exclusion set.
+    fam_all = set(fam_ids)
+    for c in cats:
+        fam_all |= _SCOPE_CATEGORIES.get(c, {}).get("families", set())
+
+    dropped: list[dict] = []
+    kept: list[BOQLine] = []
+    for line in boq:
+        prod = dp.products.get(getattr(line, "product_id", "") or "")
+        fid = prod.family_id if prod else ""
+        drop = False
+        if fid and fid in fam_all:
+            drop = True
+        elif line.scenario_id and line.scenario_id in scen_ids:
+            drop = True
+        elif cats and _line_in_excluded_category(line, cats):
+            drop = True
+        if drop:
+            dropped.append({"product_model": line.product_model,
+                            "product_description": line.product_description,
+                            "family_id": fid})
+        else:
+            kept.append(line)
+    if dropped:
+        boq[:] = kept
+        for i, line in enumerate(boq, start=1):
+            line.boq_line = i
+    summary = {
+        "categories": sorted(cats), "family_ids": sorted(fam_ids),
+        "scenario_ids": sorted(scen_ids),
+        "source": "keyword-fallback" if used_fallback else "llm-directives",
+        "lines": len(dropped),
+    }
+    return dropped, summary
+
+
+def _apply_quantity_hints(
+    asset_counts: dict, directives: list[dict], dp: DataPackage
+) -> list[dict]:
+    """Seed/override drawing asset counts from user ``quantity_hint`` directives.
+
+    A hint maps to a drawing asset type either directly (``asset_type``) or via a
+    ``count_field`` (using ``COUNT_FIELD_TO_ASSET_TYPE``). The user-stated value
+    overrides the drawing-derived count so sizing reflects what the operator
+    explicitly provided. Returns the list of applied hints for transparency.
+    """
+    applied: list[dict] = []
+    for d in directives or []:
+        if d.get("type") != "quantity_hint":
+            continue
+        value = d.get("value") or 0
+        if not value:
+            continue
+        atypes: list[str] = []
+        if d.get("asset_type"):
+            atypes = [d["asset_type"]]
+        elif d.get("count_field"):
+            atypes = constants.COUNT_FIELD_TO_ASSET_TYPE.get(d["count_field"], [])
+        if not atypes:
+            continue
+        target = atypes[0]
+        asset_counts[target] = float(value)
+        applied.append({"asset_type": target, "value": float(value),
+                        "count_field": d.get("count_field", ""),
+                        "rationale": d.get("rationale", "")})
+    return applied
+
+
 def _asset_counts(drawing_assets: list[dict]) -> dict[str, float]:
     """Aggregate in-scope drawing asset quantities by asset_type.
 
@@ -586,6 +797,16 @@ def generate_boq(detected: list[dict], matches: list[ProductMatch],
         review_status = "Needs Review" if (blockers or not derivable
                                            or match.match_status != "Recommended") else "Draft"
         notes = []
+        # An in-scope family whose count could not be derived must not read as a
+        # real "0" (that looks like "not required" and silently drops the line's
+        # value, e.g. the SF6 GDM sensor count). Flag it explicitly as TBD so a
+        # reviewer fills the quantity; the paired clarification question carries
+        # the ask.
+        if not derivable and not qty:
+            notes.append(
+                "QUANTITY TBD — not derivable from the documents/drawings provided; "
+                "confirm count before quoting (do not treat as zero)."
+            )
         if blockers:
             notes.append("Guardrails: " + ", ".join(sorted(set(blockers))))
         if match.gap_or_risk:
@@ -916,7 +1137,12 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     detected = step1["detected_scenarios"]
     requirements = step1["structured_requirements"]
     drawing_assets = step1["drawing_asset_list"]
+    directives = step1.get("context_directives", []) or []
     asset_counts = _asset_counts(drawing_assets)
+
+    # User-provided quantity hints (e.g. "6 feeders", "273 gas zones") override
+    # the drawing-derived counts before sizing.
+    applied_hints = _apply_quantity_hints(asset_counts, directives, dp)
 
     matches = match_products(detected, requirements, dp, project_id)
     compat_flags = apply_compatibility(detected, requirements, asset_counts, dp)
@@ -944,6 +1170,26 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
             1 for b in boq if b.review_status == "Needs Review"
         )
         boq_summary["mea_expansion_lines"] = len(mea_lines)
+
+    # Apply the user's scope exclusions to the fully assembled BOQ. Uses the
+    # structured directives interpreted in Step 1 (exclude by category / family /
+    # scenario); falls back to a deterministic keyword parse of the raw context
+    # when the LLM was unavailable. These service / training / spares lines are
+    # added deterministically above (not by the Step 1 prompt), so this is the
+    # only place they can be removed.
+    scope_dropped, scope_summary = _apply_context_exclusions(
+        boq, directives, dp, step1.get("user_context", "")
+    )
+    if applied_hints:
+        boq_summary["quantity_hints_applied"] = applied_hints
+    if scope_dropped:
+        boq_summary["total_lines"] = len(boq)
+        boq_summary["lines_needing_review"] = sum(
+            1 for b in boq if b.review_status == "Needs Review"
+        )
+        boq_summary["scope_excluded"] = scope_summary
+        boq_summary["scope_excluded_detail"] = scope_dropped
+
     missing = generate_missing_info(
         detected, requirements, compat_flags, quantity_gaps, dp, project_id
     )

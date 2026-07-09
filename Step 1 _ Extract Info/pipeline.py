@@ -106,6 +106,10 @@ def extract_evidence(
                 idx = matching.find_term(text_lower, syn.raw_term)
                 if idx < 0:
                     continue
+                # Skip hits the spec explicitly places out of supply scope
+                # (future expansion / optional / another party's supply).
+                if matching.in_exclusion_context(text, idx):
+                    continue
                 scenario = dp.scenarios.get(syn.scenario_id)
                 raw_hits.append(
                     Evidence(
@@ -131,6 +135,10 @@ def extract_evidence(
                 for kw in scenario.keywords:
                     idx = matching.find_term(text_lower, kw)
                     if idx < 0:
+                        continue
+                    # Skip hits the spec explicitly marks as out of supply scope
+                    # (e.g. "…is not part of the scope of this description").
+                    if matching.in_exclusion_context(text, idx):
                         continue
                     # Generic keywords (e.g. "relay") must be corroborated by a
                     # scenario-specific term in the same segment, else skip.
@@ -537,6 +545,46 @@ def _merge_requirements(rules_reqs: list[Requirement], llm_reqs: list[dict],
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+def _apply_include_directives(
+    detected: list[dict], directives: list[dict], dp: DataPackage
+) -> None:
+    """Add user-requested scenarios (``include`` directives) not already detected.
+
+    Resolves a directive's ``scenario_id`` directly, or a ``family_id`` to that
+    family's applicable scenarios. Added entries are flagged and given a
+    Needs-Review confidence so they are surfaced (and clarified) rather than
+    silently priced.
+    """
+    if not directives:
+        return
+    present = {d["scenario_id"] for d in detected}
+    for direc in directives:
+        if direc.get("type") != "include":
+            continue
+        sids: list[str] = []
+        if direc.get("scenario_id"):
+            sids.append(direc["scenario_id"])
+        elif direc.get("family_id"):
+            fam = dp.families.get(direc["family_id"])
+            if fam:
+                sids.extend(fam.applicable_scenarios)
+        for sid in sids:
+            scenario = dp.scenarios.get(sid)
+            if not scenario or sid in present:
+                continue
+            present.add(sid)
+            detected.append({
+                "scenario_id": sid,
+                "scenario": scenario.application_scenario,
+                "asset_type": scenario.asset_type,
+                "confidence": 0.5,
+                "asset_corroborated": False,
+                "evidence_count": 0,
+                "evidence_ids": [],
+                "user_requested": True,
+            })
+
+
 def _combine_instructions(extra_rules: str, context_notes: str) -> str:
     """Merge operator rule-file text with user-typed project context.
 
@@ -586,6 +634,17 @@ def run(
     evidence = extract_evidence(docs, dp, project_id)
     detected = detect_scenarios(evidence, dp, corpus_lower)
 
+    # --- Interpret the user's free-text context into structured directives that
+    #     BOTH steps can act on (exclude / include / quantity_hint / note). Kept
+    #     separate from scenario refinement so Step 2 can consume it too. ---
+    context_directives: list[dict] = []
+    if client.available and (context_notes or "").strip():
+        directives = llm_extract.interpret_context(
+            client, dp, context_notes, extra_instructions=extra_rules
+        )
+        if directives:
+            context_directives = directives
+
     # --- LLM augmentation: refine scenarios (precision) before requirements ---
     llm_used = False
     llm_dropped: list[dict] = []
@@ -596,6 +655,11 @@ def run(
         if refinement:
             llm_used = True
             detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
+
+    # Honour explicit user "include" directives: if the operator asked for a
+    # scenario the evidence did not surface, add it (flagged, Needs-Review
+    # confidence) so requirement extraction and Step 2 matching pick it up.
+    _apply_include_directives(detected, context_directives, dp)
 
     drawing_assets = extract_drawing_assets(docs, project_id, llm_client=client)
     requirements = extract_requirements(
@@ -628,6 +692,7 @@ def run(
             "sld_text_augmented_docs": sld_text_augmented,
         },
         "user_context": (context_notes or "").strip(),
+        "context_directives": context_directives,
         "documents": [
             {"file_name": d.file_name, "doc_type": d.doc_type,
              "segments": len(d.segments)}

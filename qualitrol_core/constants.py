@@ -21,6 +21,11 @@ COUNT_FIELD_TO_METRIC = {
     "pcc_count": "MET_ASSET_COUNT",
     "measurement_point_count": "MET_ASSET_COUNT",
     "accessory_count": "MET_SENSOR_COUNT",
+    # GIS gas-zone assets (2026-07 DMS GIS SLD diagram review).
+    "gas_zone_count": "MET_ASSET_COUNT",
+    "compartment_count": "MET_ASSET_COUNT",
+    "disconnector_count": "MET_ASSET_COUNT",
+    "earthing_switch_count": "MET_ASSET_COUNT",
 }
 
 # Quantity-rule count field -> drawing asset type(s) (from 14_Drawing_Asset_List).
@@ -31,7 +36,7 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "panel_count": ["Switchgear Panel", "Switchgear"],
     "generator_count": ["Generator"],
     "motor_count": ["Motor"],
-    "sensor_count": ["Sensor", "PD Sensor"],
+    "sensor_count": ["Sensor", "PD Sensor", "Gas Density Sensor"],
     "bushing_count": ["Bushing"],
     "accessory_count": ["Accessory", "Sensor"],
     # Feeders are the primary sizing basis for DFR/PMU/PQ recorders (1 DAU per
@@ -50,6 +55,14 @@ COUNT_FIELD_TO_ASSET_TYPE = {
     "tap_changer_count": ["Tap Changer"],
     "capacitor_bank_count": ["Capacitor Bank"],
     "cabinet_count": ["Cabinet"],
+    # GIS gas-zone assets (from 2026-07 DMS GIS SLD diagram review). A monitored
+    # gas zone / compartment drives one WIKA GDHT-20 gas-density sensor
+    # (GIS_SF6_001 / QR_SF6_SNS = 1 sensor per zone); disconnector / earthing
+    # switch zones inform the UHF protector recommendation.
+    "gas_zone_count": ["Gas Compartment", "Gas Density Sensor"],
+    "compartment_count": ["Gas Compartment"],
+    "disconnector_count": ["Disconnector Switch"],
+    "earthing_switch_count": ["Earthing Switch"],
 }
 
 # --------------------------------------------------------------------------- #
