@@ -1,0 +1,16 @@
+# --- core service (required) ---
+fastapi>=0.115
+uvicorn[standard]>=0.32
+gunicorn>=23.0
+Pillow>=10.0
+
+# --- Claude ---
+# anthropic[bedrock] pulls boto3 for the AWS Bedrock transport (the AWS endpoint).
+anthropic[bedrock]>=0.40
+
+# --- agent loop (Claude Agent SDK) ---
+# Bundles the Claude Code CLI binary (no separate Node.js install needed).
+claude-agent-sdk>=0.1
+
+# --- optional secondary vision engine ---
+# openai>=1.40
