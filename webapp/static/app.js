@@ -102,6 +102,10 @@
         });
       }
     });
+    // Lazily load the Spec Review page the first time it's opened for a case.
+    if (name === "spec" && typeof maybeLoadSpecReview === "function") {
+      maybeLoadSpecReview(false);
+    }
   }
 
   tabButtons.forEach((btn) =>
@@ -726,127 +730,324 @@
     });
   }
 
-  // ── Review Spec Sections modal ─────────────────────────────────────────
-  // Spec-document-only requirement list. The reviewer can edit/delete items and
-  // then "Start New Analysis" to regenerate the BOQ from the edited spec scope
-  // (plus SLD-derived scope). "Review Draft BOQ" jumps to the review tab.
-  const specModal = $("#spec-modal");
-  let specSections = [];   // working copy: [{...item, deleted}]
+  // ── Spec Review tab ────────────────────────────────────────────────────
+  // A full workflow page (between File Ingestion and Requirement Review):
+  //   Left  = page-by-page preview of the source spec document(s), switchable
+  //           via a dropdown, with a dynamic highlight overlay.
+  //   Right = the extracted Qualitrol-relevant requirement locations (location
+  //           + confidence only), ordered front-to-back; click one to jump to
+  //           and highlight its region in the source on the left.
+  // "Start New Analysis" is hidden (functionality preserved); "Review Draft BOQ"
+  // jumps to the Requirement Review tab.
+  let specData = null;        // { caseId, documents:[{name,isPdf,pageCount,pageSizes}], items:[...] }
+  let specCurrentDoc = null;  // doc name shown on the left
+  let specLoadedCaseId = null;
+  let specSections = [];      // working copy for Start New Analysis: [{...item, deleted}]
   let specCaseId = null;
+  let specPageObserver = null;
 
-  async function openSpecModal() {
-    if (IS_STATIC) {
-      alert("Spec section review isn't available in the static demo.");
-      return;
-    }
-    const caseId = currentExtraction && currentExtraction.caseReference;
-    if (!caseId) {
-      alert("Run an analysis (or load the sample) first.");
-      return;
-    }
-    specCaseId = caseId;
-    if (specModal) specModal.classList.remove("hidden");
-    $("#spec-list").innerHTML = "";
-    $("#spec-count").textContent = "Loading…";
-    $("#spec-docs").textContent = "";
-    $("#spec-foot-status").textContent = "";
-    try {
-      const res = await fetch(`${API}/spec/sections/${encodeURIComponent(caseId)}`);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-      specSections = (data.items || []).map((it) => ({ ...it, deleted: false }));
-      $("#spec-docs").textContent = (data.documents || []).length
-        ? "Source: " + data.documents.join(", ")
-        : "";
-      renderSpecSections();
-    } catch (err) {
-      $("#spec-list").innerHTML =
-        `<div class="spec-empty">Couldn't load spec sections: ${escapeHtml(err.message)}</div>`;
-      $("#spec-count").textContent = "";
-    }
-  }
-
-  // Same colour ramp as the Requirement Review confidence pills:
-  // ~60%→red, ~70%→orange, ~80%→yellow, ~100%→green (below 60% clamps to red).
+  // Confidence colour ramp: ~60%→red, ~70%→orange, ~80%→yellow, ~100%→green.
   function specConfColor(v) {
     if (v == null) return "#9aa0a6";
     const t = Math.max(0, Math.min(1, (v - 0.6) / 0.4));
     return `hsl(${Math.round(t * 120)}, 70%, 42%)`;
   }
 
-  function renderSpecSections() {
-    const list = $("#spec-list");
-    if (!list) return;
-    const active = specSections.filter((s) => !s.deleted);
-    const removed = specSections.length - active.length;
-    $("#spec-count").textContent = specSections.length
-      ? `${active.length} requirement${active.length !== 1 ? "s" : ""}` +
-        (removed ? ` · ${removed} removed` : "")
-      : "No spec-derived requirements found.";
-    if (!specSections.length) {
-      list.innerHTML =
-        `<div class="spec-empty">No requirements were extracted from specification documents (this may be an SLD-only submission, or nothing matched).</div>`;
+  function gotoSpecReview() {
+    if (IS_STATIC) {
+      alert("Spec review isn't available in the static demo. Run python app.py.");
       return;
     }
-    list.innerHTML = "";
-    specSections.forEach((it, idx) => {
-      const loc = [
-        it.document || "",
-        it.page ? `page ${it.page}` : "",
-        it.line ? `line ${it.line}` : "",
-      ].filter(Boolean).join(" · ");
-      const conf = Math.round((it.confidence || 0) * 100);
-      const reasonText = (it.reason || "").trim();
-      const el = document.createElement("div");
-      el.className = "spec-item" + (it.deleted ? " spec-deleted" : "");
-      el.dataset.idx = String(idx);
-      el.innerHTML = `
-        <div class="spec-grid">
-          <div class="spec-head-l">
-            <span class="spec-field-label">Scenario</span>
-            <span class="conf-pill" style="background:${specConfColor(it.confidence)};" title="Detection confidence for this requirement's scenario.">
-              <span class="conf-dot"></span>${conf}% confidence
-            </span>
-          </div>
-          <div class="spec-head-r">
-            <span class="spec-field-label">Source region</span>
-          </div>
-          <div class="spec-body-l">
-            <input class="spec-input" data-field="scenario" value="${escapeHtml(it.scenario || "")}" ${it.deleted ? "disabled" : ""} />
-            <div class="spec-field-label">Asset</div>
-            <input class="spec-input" data-field="assetType" value="${escapeHtml(it.assetType || "")}" placeholder="—" ${it.deleted ? "disabled" : ""} />
-            <div class="spec-field-label">Reason — why this is relevant</div>
-            <div class="spec-reason-text">${reasonText ? escapeHtml(reasonText) : '<span class="spec-reason-empty">—</span>'}</div>
-          </div>
-          <div class="spec-img-wrap" data-img-for="${escapeHtml(it.id)}">
-            <div class="spec-img-empty">${it.hasImage === false ? "No preview available for this location." : "Loading preview…"}</div>
-          </div>
-        </div>
-        <div class="spec-footrow">
-          <span class="spec-loc" title="Location in the source document">
-            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"/></svg>
-            <span class="spec-loc-text">${escapeHtml(loc || "Location unavailable")}</span>
-          </span>
-          <button type="button" class="spec-del-btn" data-action="${it.deleted ? "restore" : "delete"}">${it.deleted ? "Restore" : "Delete"}</button>
-        </div>`;
-      list.appendChild(el);
-
-      if (it.hasImage !== false && it.imageUrl) {
-        const wrap = el.querySelector("[data-img-for]");
-        const img = new Image();
-        img.alt = "Source region for " + (it.scenario || "requirement");
-        img.onload = () => { wrap.innerHTML = ""; wrap.appendChild(img); };
-        img.onerror = () => {
-          wrap.innerHTML = `<div class="spec-img-empty">No preview available.</div>`;
-        };
-        img.addEventListener("click", () => window.open(it.imageUrl, "_blank"));
-        img.src = it.imageUrl;
-      }
-    });
+    switchTab("spec");
+    maybeLoadSpecReview(true);
   }
 
-  function closeSpecModal() {
-    if (specModal) specModal.classList.add("hidden");
+  function maybeLoadSpecReview(force) {
+    if (IS_STATIC) return;
+    const caseId = currentExtraction && currentExtraction.caseReference;
+    if (!caseId) return;
+    if (!force && specLoadedCaseId === caseId) return;
+    loadSpecReview(caseId);
+  }
+
+  async function loadSpecReview(caseId) {
+    specCaseId = caseId;
+    const view = $("#spec-doc-view");
+    const list = $("#spec-loc-list");
+    const sel = $("#spec-doc-select");
+    if (view) view.innerHTML = `<div class="spec-doc-empty">Loading source document…</div>`;
+    if (list) list.innerHTML = `<div class="spec-doc-empty">Loading…</div>`;
+    if ($("#spec-loc-count")) $("#spec-loc-count").textContent = "…";
+    try {
+      const res = await fetch(`${API}/spec/sections/${encodeURIComponent(caseId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      specData = data;
+      specLoadedCaseId = caseId;
+      // Working copy (the source of truth for the location list): carries the
+      // per-item feedback/comments (restored from the server) + a deleted flag.
+      specSections = (data.items || []).map((it) => ({ ...it, deleted: false }));
+      const hp = $("#spec-human-prompt");
+      if (hp) hp.value = data.humanPrompt || "";
+
+      const docs = data.documents || [];
+      if (sel) {
+        sel.innerHTML = docs
+          .map((d, i) => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}${d.isPdf ? "" : " (no page preview)"}</option>`)
+          .join("");
+      }
+      $("#spec-source-badge").textContent = docs.length
+        ? `${docs.length} document${docs.length !== 1 ? "s" : ""}`
+        : "No document";
+
+      if (!docs.length) {
+        if (view) view.innerHTML = `<div class="spec-doc-empty">No specification documents found for this case (it may be an SLD-only submission).</div>`;
+      } else {
+        specCurrentDoc = docs[0].name;
+        renderSpecDocView(specCurrentDoc);
+      }
+      renderSpecLocations();
+    } catch (err) {
+      if (view) view.innerHTML = `<div class="spec-doc-empty">Couldn't load the source document: ${escapeHtml(err.message)}</div>`;
+      if (list) list.innerHTML = `<div class="spec-doc-empty">Couldn't load requirement locations.</div>`;
+      if ($("#spec-loc-count")) $("#spec-loc-count").textContent = "0";
+    }
+  }
+
+  function specDocByName(name) {
+    return (specData && (specData.documents || []).find((d) => d.name === name)) || null;
+  }
+
+  function renderSpecDocView(docName) {
+    specCurrentDoc = docName;
+    const sel = $("#spec-doc-select");
+    if (sel && sel.value !== docName) sel.value = docName;
+    const view = $("#spec-doc-view");
+    if (!view) return;
+    if (specPageObserver) { specPageObserver.disconnect(); specPageObserver = null; }
+
+    const doc = specDocByName(docName);
+    if (!doc) { view.innerHTML = `<div class="spec-doc-empty">Document not found.</div>`; return; }
+    if (!doc.isPdf || !(doc.pageSizes || []).length) {
+      view.innerHTML =
+        `<div class="spec-doc-empty">A page-by-page preview is only available for PDF documents.<br>“${escapeHtml(docName)}” can't be rendered here — its requirement locations still appear on the right.</div>`;
+      return;
+    }
+
+    view.innerHTML = "";
+    doc.pageSizes.forEach(([w, h], i) => {
+      const pageNo = i + 1;
+      const el = document.createElement("div");
+      el.className = "spec-page";
+      el.dataset.page = String(pageNo);
+      el.style.aspectRatio = `${w} / ${h}`;
+      el.innerHTML =
+        `<span class="spec-page-label">Page ${pageNo}</span>` +
+        `<div class="spec-page-ph" style="position:absolute;inset:0;">Page ${pageNo}</div>`;
+      view.appendChild(el);
+    });
+
+    // Lazy-load page images as they scroll near the viewport.
+    specPageObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const el = entry.target;
+          specPageObserver.unobserve(el);
+          loadSpecPageImage(el, docName, Number(el.dataset.page));
+        });
+      },
+      { root: view, rootMargin: "600px 0px" }
+    );
+    view.querySelectorAll(".spec-page").forEach((el) => specPageObserver.observe(el));
+  }
+
+  function loadSpecPageImage(pageEl, docName, pageNo) {
+    if (pageEl.dataset.loaded === "1") return;
+    pageEl.dataset.loaded = "1";
+    const img = new Image();
+    img.alt = `${docName} — page ${pageNo}`;
+    img.onload = () => {
+      const ph = pageEl.querySelector(".spec-page-ph");
+      if (ph) ph.remove();
+      pageEl.style.aspectRatio = "";
+      pageEl.insertBefore(img, pageEl.firstChild.nextSibling);
+    };
+    img.onerror = () => {
+      const ph = pageEl.querySelector(".spec-page-ph");
+      if (ph) ph.textContent = `Couldn't render page ${pageNo}`;
+    };
+    img.src =
+      `${API}/spec/page/${encodeURIComponent(specCaseId)}` +
+      `?doc=${encodeURIComponent(docName)}&page=${pageNo}&zoom=2`;
+  }
+
+  function specLocTitle(it, multiDoc) {
+    const parts = [];
+    if (multiDoc && it.document) parts.push(it.document);
+    parts.push(`Page ${it.page || "?"}`);
+    if (it.line) parts.push(`Line ${it.line}`);
+    return parts.join(" · ");
+  }
+
+  function renderSpecLocations() {
+    const list = $("#spec-loc-list");
+    if (!list) return;
+    const items = specSections || [];
+    const multiDoc = ((specData && specData.documents) || []).length > 1;
+    const activeCount = items.filter((s) => !s.deleted).length;
+    if ($("#spec-loc-count")) {
+      $("#spec-loc-count").textContent =
+        activeCount === items.length ? String(items.length) : `${activeCount}/${items.length}`;
+    }
+    if (!items.length) {
+      list.innerHTML = `<div class="spec-doc-empty">No Qualitrol-relevant requirement locations were found in the specification document(s).</div>`;
+      return;
+    }
+    list.innerHTML = items
+      .map((it, idx) => {
+        const conf = Math.round((it.confidence || 0) * 100);
+        const snip = (it.snippet || "").trim().replace(/\s+/g, " ").slice(0, 110);
+        const fb = it.feedback || "";
+        const upCls = fb === "Positive" ? " selected-up" : fb === "Negative" ? " dim" : "";
+        const downCls = fb === "Negative" ? " selected-down" : fb === "Positive" ? " dim" : "";
+        const actions = it.deleted
+          ? `<button type="button" class="spec-loc-restore" data-act="restore" data-idx="${idx}">Restore</button>`
+          : `<button type="button" class="spec-fb-btn${upCls}" data-act="up" data-idx="${idx}" title="Looks right" aria-label="Thumbs up">👍</button>
+             <button type="button" class="spec-fb-btn${downCls}" data-act="down" data-idx="${idx}" title="Not right — tell us why" aria-label="Thumbs down">👎</button>
+             <button type="button" class="spec-del-btn" data-act="delete" data-idx="${idx}" title="Delete this requirement" aria-label="Delete">🗑</button>`;
+        return `<div class="spec-loc-item${it.deleted ? " spec-loc-deleted" : ""}" data-idx="${idx}">
+          <span class="spec-loc-main" data-act="jump" data-idx="${idx}">
+            <span class="spec-loc-title">${escapeHtml(specLocTitle(it, multiDoc))}</span>
+            ${snip ? `<span class="spec-loc-sub">${escapeHtml(snip)}${it.snippet && it.snippet.length > 110 ? "…" : ""}</span>` : ""}
+          </span>
+          <span class="spec-loc-side">
+            <span class="conf-pill" style="background:${specConfColor(it.confidence)};" title="Extraction confidence">
+              <span class="conf-dot"></span>${conf}%
+            </span>
+            <span class="spec-loc-actions">${actions}</span>
+          </span>
+        </div>`;
+      })
+      .join("");
+  }
+
+  function specJumpTo(idx) {
+    const it = (specSections || [])[idx];
+    if (!it) return;
+    const list = $("#spec-loc-list");
+    if (list) {
+      list.querySelectorAll(".spec-loc-item").forEach((b) =>
+        b.classList.toggle("active", Number(b.dataset.idx) === idx)
+      );
+    }
+    const doc = specDocByName(it.document);
+    if (!doc || !doc.isPdf) {
+      $("#spec-foot-status").textContent =
+        `“${it.document}” has no page preview, so this location can't be highlighted visually.`;
+      if (it.document && it.document !== specCurrentDoc) {
+        const sel = $("#spec-doc-select");
+        if (sel) { sel.value = it.document; }
+        renderSpecDocView(it.document);
+      }
+      return;
+    }
+    $("#spec-foot-status").textContent = "";
+    const doJump = () => scrollToSpecRegion(it);
+    if (it.document !== specCurrentDoc) {
+      const sel = $("#spec-doc-select");
+      if (sel) sel.value = it.document;
+      renderSpecDocView(it.document);
+      // Let the new page placeholders lay out before scrolling.
+      setTimeout(doJump, 60);
+    } else {
+      doJump();
+    }
+  }
+
+  function scrollToSpecRegion(it) {
+    const view = $("#spec-doc-view");
+    if (!view) return;
+    const pageEl = view.querySelector(`.spec-page[data-page="${it.page || 1}"]`);
+    if (!pageEl) return;
+    // Ensure the target page image starts loading immediately.
+    loadSpecPageImage(pageEl, specCurrentDoc, Number(pageEl.dataset.page));
+    pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
+
+    // Remove any prior highlight, then place a fresh pulsing line-band. The band
+    // spans the text column at the region's vertical position (no hard box), so
+    // it reads as a dynamic highlight on the relevant line(s).
+    view.querySelectorAll(".spec-highlight").forEach((h) => h.remove());
+    const bbox = it.bbox;
+    const hl = document.createElement("div");
+    hl.className = "spec-highlight";
+    if (bbox && bbox.length === 4) {
+      const pad = 0.006; // small vertical padding around the line
+      const top = Math.max(0, bbox[1] - pad);
+      const bottom = Math.min(1, bbox[3] + pad);
+      hl.style.left = "2.5%";
+      hl.style.width = "95%";
+      hl.style.top = `${top * 100}%`;
+      hl.style.height = `${Math.max(0.014, bottom - top) * 100}%`;
+    } else {
+      // No precise region located: pulse a band near the top of the page.
+      hl.style.left = "2.5%";
+      hl.style.top = "2%";
+      hl.style.width = "95%";
+      hl.style.height = "4%";
+    }
+    pageEl.appendChild(hl);
+  }
+
+  // ── Per-item feedback (👍/👎 + comment) & delete ────────────────────────
+  let specPendingFbIdx = null;
+
+  async function specSubmitFeedback(idx, feedback, comments) {
+    const it = (specSections || [])[idx];
+    if (!it || !specCaseId) return;
+    it.feedback = feedback;
+    it.comments = comments || "";
+    renderSpecLocations();
+    try {
+      await fetch(`${API}/spec/${encodeURIComponent(specCaseId)}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requirementId: it.id,
+          location: specLocTitle(it, true),
+          feedback,
+          comments: comments || "",
+        }),
+      });
+    } catch (_) {
+      if ($("#spec-foot-status")) $("#spec-foot-status").textContent =
+        "Couldn't save that rating — please try again.";
+    }
+  }
+
+  function openSpecFbModal(idx) {
+    const it = (specSections || [])[idx];
+    specPendingFbIdx = idx;
+    const ta = $("#spec-fb-comment");
+    if (ta) ta.value = (it && it.comments) || "";
+    const target = $("#spec-fb-target");
+    if (target) target.textContent = it ? `Item: ${specLocTitle(it, true)}` : "";
+    const m = $("#spec-fb-modal");
+    if (m) m.classList.remove("hidden");
+    setTimeout(() => ta && ta.focus(), 40);
+  }
+
+  function closeSpecFbModal() {
+    const m = $("#spec-fb-modal");
+    if (m) m.classList.add("hidden");
+    specPendingFbIdx = null;
+  }
+
+  function specToggleDelete(idx, deleted) {
+    const it = (specSections || [])[idx];
+    if (!it) return;
+    it.deleted = deleted;
+    renderSpecLocations();
   }
 
   async function specStartAnalysis() {
@@ -854,21 +1055,18 @@
     const btn = $("#btn-spec-analyze");
     const orig = btn ? btn.innerHTML : "";
     if (btn) { btn.disabled = true; btn.innerHTML = "<span>Regenerating…</span>"; }
-    $("#spec-foot-status").textContent =
-      "Regenerating the BOQ from your edited spec requirements…";
+    if ($("#spec-foot-status")) $("#spec-foot-status").textContent =
+      "Regenerating the BOQ from the updated requirement list + human prompt…";
     try {
       const items = specSections.map((s) => ({
-        id: s.id,
-        scenario: s.scenario,
-        assetType: s.assetType,
-        reason: s.reason,
-        snippet: s.snippet,
-        deleted: !!s.deleted,
+        id: s.id, scenario: s.scenario, assetType: s.assetType,
+        reason: s.reason, snippet: s.snippet, deleted: !!s.deleted,
       }));
+      const contextNotes = ($("#spec-human-prompt")?.value || "").trim();
       const res = await fetch(
         `${API}/boq/${encodeURIComponent(specCaseId)}/rebuild-from-spec`,
         { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items }) }
+          body: JSON.stringify({ items, contextNotes }) }
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -879,10 +1077,10 @@
         if (rec) { rec.extraction = data.extraction; writeHistory(list); }
       }
       const removed = (data.removedScenarios || []).length;
-      $("#spec-foot-status").textContent =
-        `BOQ regenerated${removed ? ` · ${removed} scenario(s) removed from scope` : ""}. Click “Review Draft BOQ” to view it.`;
+      if ($("#spec-foot-status")) $("#spec-foot-status").textContent =
+        `BOQ regenerated${removed ? ` · ${removed} scenario(s) removed from scope` : ""}. Click “Review Draft BOQ”.`;
     } catch (err) {
-      $("#spec-foot-status").textContent = "";
+      if ($("#spec-foot-status")) $("#spec-foot-status").textContent = "";
       alert("Couldn't regenerate the BOQ: " + err.message);
     } finally {
       if (btn) { btn.disabled = false; btn.innerHTML = orig; }
@@ -890,40 +1088,53 @@
   }
 
   if ($("#review-spec-sections")) {
-    $("#review-spec-sections").addEventListener("click", openSpecModal);
+    $("#review-spec-sections").addEventListener("click", gotoSpecReview);
   }
   if ($("#boq-review-spec")) {
-    $("#boq-review-spec").addEventListener("click", openSpecModal);
+    $("#boq-review-spec").addEventListener("click", gotoSpecReview);
   }
-  if ($("#btn-spec-close")) $("#btn-spec-close").addEventListener("click", closeSpecModal);
   if ($("#btn-spec-goboq")) {
-    $("#btn-spec-goboq").addEventListener("click", () => { closeSpecModal(); switchTab("boq"); });
+    $("#btn-spec-goboq").addEventListener("click", () => switchTab("boq"));
   }
   if ($("#btn-spec-analyze")) {
     $("#btn-spec-analyze").addEventListener("click", specStartAnalysis);
   }
-  if (specModal) {
-    specModal.addEventListener("click", (e) => { if (e.target === specModal) closeSpecModal(); });
-    $("#spec-list").addEventListener("input", (e) => {
-      const row = e.target.closest(".spec-item");
-      if (!row) return;
-      const idx = Number(row.dataset.idx);
-      const field = e.target.dataset.field;
-      if (field && specSections[idx]) specSections[idx][field] = e.target.value;
+  if ($("#spec-doc-select")) {
+    $("#spec-doc-select").addEventListener("change", (e) => renderSpecDocView(e.target.value));
+  }
+  if ($("#spec-loc-list")) {
+    $("#spec-loc-list").addEventListener("click", (e) => {
+      const actEl = e.target.closest("[data-act]");
+      if (!actEl) return;
+      const idx = Number(actEl.dataset.idx);
+      switch (actEl.dataset.act) {
+        case "jump": specJumpTo(idx); break;
+        case "up": specSubmitFeedback(idx, "Positive", ""); break;
+        case "down": openSpecFbModal(idx); break;
+        case "delete": specToggleDelete(idx, true); break;
+        case "restore": specToggleDelete(idx, false); break;
+      }
     });
-    $("#spec-list").addEventListener("click", (e) => {
-      const actBtn = e.target.closest("[data-action]");
-      if (!actBtn) return;
-      const row = e.target.closest(".spec-item");
-      const idx = Number(row.dataset.idx);
-      if (!specSections[idx]) return;
-      specSections[idx].deleted = actBtn.dataset.action === "delete";
-      renderSpecSections();
+  }
+  if ($("#btn-spec-fb-close")) $("#btn-spec-fb-close").addEventListener("click", closeSpecFbModal);
+  if ($("#btn-spec-fb-cancel")) $("#btn-spec-fb-cancel").addEventListener("click", closeSpecFbModal);
+  if ($("#btn-spec-fb-submit")) {
+    $("#btn-spec-fb-submit").addEventListener("click", async () => {
+      const idx = specPendingFbIdx;
+      if (idx == null) return closeSpecFbModal();
+      const comment = ($("#spec-fb-comment").value || "").trim();
+      closeSpecFbModal();
+      await specSubmitFeedback(idx, "Negative", comment);
+    });
+  }
+  if ($("#spec-fb-modal")) {
+    $("#spec-fb-modal").addEventListener("click", (e) => {
+      if (e.target === $("#spec-fb-modal")) closeSpecFbModal();
     });
   }
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && specModal && !specModal.classList.contains("hidden")) {
-      closeSpecModal();
+    if (e.key === "Escape" && $("#spec-fb-modal") && !$("#spec-fb-modal").classList.contains("hidden")) {
+      closeSpecFbModal();
     }
   });
 

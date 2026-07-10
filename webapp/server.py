@@ -811,6 +811,26 @@ def _resolve_case(case_id: str) -> tuple[str, Path, Path, list[Path]]:
     return safe, step1_path, case_dir, search_dirs
 
 
+SPEC_FEEDBACK_FILE = "spec_feedback.json"
+
+
+def _spec_feedback_path(safe: str) -> Path:
+    return config.OUTPUT_DIR / safe / SPEC_FEEDBACK_FILE
+
+
+def _load_spec_feedback(safe: str) -> dict:
+    """Return stored per-item spec feedback as {evidenceId: {feedback, comments}}."""
+    path = _spec_feedback_path(safe)
+    if not path.exists():
+        return {}
+    try:
+        rec = io_utils.read_json(path)
+    except Exception:
+        return {}
+    items = rec.get("items") if isinstance(rec, dict) else None
+    return items if isinstance(items, dict) else {}
+
+
 @app.get("/api/v1/spec/sections/{case_id}")
 def get_spec_sections(case_id: str):
     """Spec-document-only requirement list for the 'Review Spec Sections' modal.
@@ -821,16 +841,144 @@ def get_spec_sections(case_id: str):
     safe, step1_path, _case_dir, search_dirs = _resolve_case(case_id)
     step1 = io_utils.read_json(step1_path)
     items = spec_review.build_sections(step1)
-    # Best-effort: refine line numbers + image availability from the source PDF.
+    # Best-effort: refine line numbers + region bbox from the source PDF.
     try:
         spec_review.enrich_lines(items, search_dirs)
     except Exception:  # noqa: BLE001 - never fail the list over image lookup
         for it in items:
             it.setdefault("hasImage", False)
+            it.setdefault("bbox", None)
+
+    # Spec documents in upload/parse order (first uploaded = the UI default),
+    # each with its per-page point sizes so the frontend can lazily render a
+    # correctly-proportioned, page-by-page source preview.
+    spec_names = spec_review.spec_doc_names(step1)
+    ordered_docs: list[str] = []
+    seen_docs: set[str] = set()
+    for d in step1.get("documents", []):
+        name = d.get("file_name", "")
+        if (name and name in spec_names and d.get("doc_type") != "Drawing / SLD"
+                and name not in seen_docs):
+            seen_docs.add(name)
+            ordered_docs.append(name)
+
+    documents: list[dict] = []
+    doc_index: dict[str, int] = {}
+    for i, name in enumerate(ordered_docs):
+        pdf = spec_review.find_source_pdf(name, search_dirs)
+        is_pdf = bool(pdf and pdf.suffix.lower() == ".pdf")
+        sizes = spec_review.page_sizes(pdf) if is_pdf else []
+        documents.append({
+            "name": name,
+            "isPdf": is_pdf,
+            "pageCount": len(sizes),
+            "pageSizes": sizes,
+        })
+        doc_index[name] = i
+
+    # Restore any per-item 👍/👎 feedback previously stored for this case.
+    fb = _load_spec_feedback(safe)
     for it in items:
         it["imageUrl"] = f"/api/v1/spec/region/{safe}/{it['id']}"
-    spec_docs = sorted(spec_review.spec_doc_names(step1))
-    return {"caseId": safe, "documents": spec_docs, "items": items}
+        entry = fb.get(it.get("id"), {}) if isinstance(fb, dict) else {}
+        it["feedback"] = entry.get("feedback", "")
+        it["comments"] = entry.get("comments", "")
+
+    # Sort by position (front to back): document order, then page, then vertical
+    # position on the page (bbox top, falling back to the line number).
+    def _pos_key(it: dict):
+        di = doc_index.get(it.get("document", ""), 999)
+        bbox = it.get("bbox")
+        y = bbox[1] if bbox else (it.get("line") or 0) / 1000.0
+        return (di, it.get("page") or 0, y, it.get("line") or 0)
+
+    items.sort(key=_pos_key)
+    return {
+        "caseId": safe,
+        "documents": documents,
+        "items": items,
+        "humanPrompt": (step1.get("user_context") or "").strip(),
+    }
+
+
+@app.get("/api/v1/spec/page/{case_id}")
+def get_spec_page(case_id: str, doc: str, page: int = 1, zoom: float = 2.0):
+    """Render a full page of a spec document (PDF) as a PNG for the preview pane."""
+    safe, _step1_path, _case_dir, search_dirs = _resolve_case(case_id)
+    pdf = spec_review.find_source_pdf(doc, search_dirs)
+    if not pdf or pdf.suffix.lower() != ".pdf":
+        raise HTTPException(404, "Source PDF not available for a page preview.")
+    png = spec_review.render_page_png(pdf, page, zoom)
+    if not png:
+        raise HTTPException(404, "Could not render this page.")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "max-age=3600"})
+
+
+@app.post("/api/v1/spec/{case_id}/feedback")
+async def submit_spec_feedback(case_id: str, request: Request):
+    """Store 👍/👎 feedback (+ optional comment) for a single spec requirement item.
+
+    Mirrors the Draft BOQ "Rate this draft" feedback, scoped per requirement item
+    (keyed by evidence id). Persisted per case and appended to a global ML log.
+    """
+    safe = _safe_case_id(case_id)
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be a feedback object.")
+
+    key = str(payload.get("requirementId") or payload.get("id") or "").strip()
+    if not key:
+        raise HTTPException(400, "requirementId is required.")
+    feedback = str(payload.get("feedback", "")).strip().title()
+    if feedback not in ("Positive", "Negative", ""):
+        raise HTTPException(400, "feedback must be 'Positive', 'Negative' or ''.")
+    comments = str(payload.get("comments", "") or "").strip()
+
+    case_dir = config.OUTPUT_DIR / safe
+    case_dir.mkdir(parents=True, exist_ok=True)
+    path = case_dir / SPEC_FEEDBACK_FILE
+    record: dict = {}
+    if path.exists():
+        try:
+            record = io_utils.read_json(path)
+        except Exception:
+            record = {}
+    if not isinstance(record, dict):
+        record = {}
+    record["caseId"] = safe
+    items = record.get("items")
+    if not isinstance(items, dict):
+        items = {}
+    entry = {
+        "id": key,
+        "location": payload.get("location", ""),
+        "feedback": feedback,
+        "comments": comments,
+        "updatedAt": _now(),
+    }
+    if feedback == "":
+        items.pop(key, None)  # clearing the rating removes the stored entry
+    else:
+        items[key] = entry
+    record["items"] = items
+    record["updatedAt"] = _now()
+    io_utils.write_json(path, record)
+
+    if feedback:
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(FEEDBACK_DIR / "spec_feedback_log.jsonl", "a",
+                      encoding="utf-8") as fh:
+                fh.write(_json.dumps({"caseId": safe, **entry}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    return {"status": "saved", "caseId": safe, "requirementId": key,
+            "feedback": feedback, "updatedAt": record["updatedAt"]}
 
 
 @app.get("/api/v1/spec/region/{case_id}/{evidence_id}")
@@ -883,6 +1031,13 @@ def _rebuild_from_spec(safe: str, payload: dict) -> dict:
     items = payload.get("items") or []
     deleted_ids = {i.get("id") for i in items if i.get("deleted")}
     edits = {i.get("id"): i for i in items if i.get("id") and not i.get("deleted")}
+
+    # Human prompt from the Spec Review page: persist it as the case's project
+    # context so the re-run of Step 2 (which reads step1["user_context"]) feeds it
+    # into the BOQ LLM augmentation and scope-exclusion handling. The textarea is
+    # pre-filled with any prior context, so we replace rather than append.
+    if "contextNotes" in payload:
+        step1["user_context"] = str(payload.get("contextNotes") or "").strip()
 
     # Scenarios that were supported by the spec BEFORE the reviewer's edits.
     original_spec_scenarios = spec_review.spec_scenario_ids(step1)

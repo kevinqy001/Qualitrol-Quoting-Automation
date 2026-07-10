@@ -234,10 +234,88 @@ def enrich_lines(items: list[dict], search_dirs: list[Path]) -> None:
                 if rects:
                     it["line"] = _line_index(page, rects[0])
                     it["hasImage"] = True
+                    it["bbox"] = _bbox_fraction(page, rects)
                 else:
                     it["hasImage"] = bool(pdf)  # can still show the full page
+                    it["bbox"] = None
         finally:
             doc.close()
+
+
+def _bbox_fraction(page, rects) -> list[float] | None:
+    """Union the located rect(s) and return [x0,y0,x1,y1] as page-size fractions.
+
+    Fractions (0..1) are resolution-independent, so the frontend can position a
+    highlight overlay over the rendered page image regardless of zoom.
+    """
+    if not rects:
+        return None
+    r = rects[0]
+    for extra in rects[1:3]:
+        try:
+            if abs(extra.y0 - r.y0) < 40:
+                r = r | extra
+        except Exception:
+            break
+    pr = page.rect
+    w = pr.width or 1.0
+    h = pr.height or 1.0
+    return [
+        max(0.0, round(r.x0 / w, 5)),
+        max(0.0, round(r.y0 / h, 5)),
+        min(1.0, round(r.x1 / w, 5)),
+        min(1.0, round(r.y1 / h, 5)),
+    ]
+
+
+def page_sizes(pdf_path: Path) -> list[list[float]]:
+    """Return [[width, height], ...] in points for every page of a PDF.
+
+    Used by the frontend to build correctly-proportioned page placeholders for
+    the source-document preview (lazy-loading the page images as they scroll in).
+    """
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+    except Exception:
+        return []
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception:
+        return []
+    try:
+        sizes: list[list[float]] = []
+        for page in doc:
+            r = page.rect
+            sizes.append([round(r.width, 2), round(r.height, 2)])
+        return sizes
+    except Exception:
+        return []
+    finally:
+        doc.close()
+
+
+def render_page_png(pdf_path: Path, page_num: int, zoom: float = 2.0) -> bytes | None:
+    """Render a full page of a PDF to PNG (no highlight — overlaid client-side)."""
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception:
+        return None
+    try:
+        pno = (page_num or 1) - 1
+        if pno < 0 or pno >= doc.page_count:
+            return None
+        zoom = max(0.5, min(float(zoom or 2.0), 3.5))
+        page = doc[pno]
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        return pix.tobytes("png")
+    except Exception:
+        return None
+    finally:
+        doc.close()
 
 
 def render_region_png(
