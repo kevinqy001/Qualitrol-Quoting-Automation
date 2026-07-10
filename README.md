@@ -72,7 +72,7 @@ python app.py
 ```
 
 Then open <http://127.0.0.1:8000>. Each upload is processed into
-`outputs/WEB-XXXXXXXX/` (the parsed files plus `step1_extract_info.json` and
+`outputs/<PROJECT_ID>/` (the parsed files plus `step1_extract_info.json` and
 `step2_create_boq.json`). The LLM layer turns on automatically when Foundry
 credentials are present; force rules-only with `QUALITROL_USE_LLM=0`.
 

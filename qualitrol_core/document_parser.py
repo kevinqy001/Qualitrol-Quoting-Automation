@@ -10,6 +10,7 @@ Supported: .pdf (pypdf), .docx (python-docx), .txt/.eml/.msg/.md (plain text),
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -259,6 +260,57 @@ def parse_document(
         doc_type=doc_type,
         segments=segments,
     )
+
+
+def _normalize_line(line: str) -> str:
+    return " ".join(line.split()).strip().lower()
+
+
+def strip_running_boilerplate(
+    docs: list[ParsedDocument],
+    *,
+    min_pages: int = 5,
+    page_fraction: float = 0.5,
+    max_line_len: int = 100,
+) -> int:
+    """Remove repeated running headers/footers from page-based documents.
+
+    A line that recurs (normalized) on at least ``page_fraction`` of a document's
+    pages and is short is a running header/footer (letterhead, tender number,
+    document code, footer column titles), not requirement content. Dropping these
+    lines cleans evidence snippets and stops the keyword net matching them, and
+    it also reaches the grounded locator (both read the same segments). Mutates
+    segment text in place; returns the number of distinct boilerplate lines
+    removed. No-op for short documents where repetition is not conclusive.
+    """
+    removed = 0
+    for doc in docs:
+        page_segs = [
+            s for s in doc.segments if s.location.lower().startswith("page ")
+        ]
+        n = len(page_segs)
+        if n < min_pages:
+            continue
+        counts: Counter[str] = Counter()
+        for seg in page_segs:
+            for norm in {_normalize_line(ln) for ln in seg.text.splitlines()}:
+                if norm:
+                    counts[norm] += 1
+        threshold = max(4, int(n * page_fraction))
+        boiler = {
+            line
+            for line, c in counts.items()
+            if c >= threshold and len(line) <= max_line_len
+        }
+        if not boiler:
+            continue
+        for seg in page_segs:
+            seg.text = "\n".join(
+                ln for ln in seg.text.splitlines()
+                if _normalize_line(ln) not in boiler
+            )
+        removed += len(boiler)
+    return removed
 
 
 def parse_project_folder(

@@ -16,9 +16,12 @@ Vision to identify assets with scope judgment; used when text confidence is low.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
-from .document_parser import ParsedDocument
+from .document_parser import DocSegment, ParsedDocument
 from .schemas import DrawingAsset
 
 _VOLTAGE_RE = re.compile(r"(\d{2,4})\s*kV", re.IGNORECASE)
@@ -432,16 +435,107 @@ def _render_pdf_page_to_b64(
         return ""
 
 
+_PAGE_LOCATION_RE = re.compile(r"^page\s+(\d+)$", re.IGNORECASE)
+
+
+def _page_text_map(doc: ParsedDocument) -> dict[int, str]:
+    """Map 1-based PDF page numbers to their native extracted text."""
+    result: dict[int, str] = {}
+    for seg in doc.segments:
+        match = _PAGE_LOCATION_RE.match(seg.location.strip())
+        if match:
+            result[int(match.group(1))] = seg.text
+    return result
+
+
+def _pdf_pages_requiring_vision(
+    doc: ParsedDocument,
+    *,
+    low_text_chars: int = 180,
+    min_image_ratio: float = 0.18,
+) -> list[int]:
+    """Return 0-based PDF pages likely to contain image-only requirements.
+
+    A repeated logo must not trigger OCR. A page is selected only when it has a
+    substantial image: either image coverage exceeds ``min_image_ratio``, or the
+    native text layer is sparse and image coverage is at least 5%. The latter
+    catches smaller screenshots while rejecting the ~1% letterhead logo seen in
+    the supplied PD specification demo.
+    """
+    if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
+        return []
+    try:
+        import fitz  # type: ignore
+    except ImportError:
+        return []
+
+    native = _page_text_map(doc)
+    already_ocr = {
+        page_number
+        for page_number, text in native.items()
+        if "[VLM OCR of embedded image]" in text
+    }
+    candidates: list[int] = []
+    try:
+        pdf = fitz.open(doc.file_path)
+        for page_index, page in enumerate(pdf):
+            if page_index + 1 in already_ocr:
+                continue
+            page_area = page.rect.width * page.rect.height
+            if page_area <= 0:
+                continue
+            image_area = 0.0
+            xrefs = {image[0] for image in page.get_images(full=True)}
+            for xref in xrefs:
+                try:
+                    image_area += sum(
+                        rect.width * rect.height
+                        for rect in page.get_image_rects(xref)
+                    )
+                except Exception:
+                    continue
+            image_ratio = min(1.0, image_area / page_area)
+            text_chars = len(native.get(page_index + 1, "").strip())
+            if image_ratio >= min_image_ratio or (
+                text_chars < low_text_chars and image_ratio >= 0.05
+            ):
+                candidates.append(page_index)
+        pdf.close()
+    except Exception:
+        return []
+    return candidates
+
+
+def _inject_page_ocr(doc: ParsedDocument, page_number: int, text: str) -> None:
+    """Attach VLM text to its native page, preserving document order."""
+    marker = "[VLM OCR of embedded image]"
+    location = f"page {page_number}"
+    for seg in doc.segments:
+        if seg.location.lower() == location:
+            if marker not in seg.text:
+                seg.text = f"{seg.text.rstrip()}\n{marker}\n{text}"
+            return
+
+    new_segment = DocSegment(location=location, text=f"{marker}\n{text}")
+    insert_at = len(doc.segments)
+    for index, seg in enumerate(doc.segments):
+        match = _PAGE_LOCATION_RE.match(seg.location.strip())
+        if match and int(match.group(1)) > page_number:
+            insert_at = index
+            break
+    doc.segments.insert(insert_at, new_segment)
+
+
 def _extract_from_sld_vlm(
     doc: ParsedDocument, project_id: str, client
 ) -> list[DrawingAsset]:
-    """Optional VLM extraction path: render SLD as image → GPT/Claude Vision.
+    """Optional VLM extraction path: render SLD as image → Claude Vision.
 
     Uses ``_render_pdf_page_to_b64`` (requires PyMuPDF) to produce a PNG then
     calls ``llm_extract.extract_sld_assets_vlm``. Vision runs on the dedicated
-    "vision" client (GPT when configured, else Claude); the injected ``client``
-    is only a fallback (e.g. tests). Falls back to an empty list when no vision
-    client is available, fitz is not installed, or rendering fails.
+    "vision" client (Claude Sonnet-5); the injected ``client`` is only a
+    fallback (e.g. tests). Falls back to an empty list when no vision client is
+    available, fitz is not installed, or rendering fails.
     """
     from . import llm_extract  # local import to avoid circular dependency
     from . import llm as _llm
@@ -467,64 +561,123 @@ def _extract_from_sld_vlm(
     return result or []
 
 
-def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
-    """Inject VLM-read drawing text into sparse drawing-only corpora (P1-A).
+def augment_docs_with_image_text(docs: list[ParsedDocument], client) -> int:
+    """Recover image-only specification pages and sparse drawing text via VLM.
 
-    Scenario detection is text-driven, so a project that supplies only SLD/BLD
-    drawings (no prose specification) yields no scenarios. When the corpus has
-    little prose text, render each drawing's first page and ask the VLM to
-    transcribe its labels/titles, then append that text as a new segment on the
-    drawing document so ``extract_evidence`` can match scenario keywords.
+    For ordinary PDFs, substantial embedded images are OCR'd page-by-page and
+    injected beside the native page text. This handles mixed PDFs where only the
+    key requirement pages are scans/screenshots. Sparse drawing-only projects
+    retain the original first-page monitoring-label extraction.
 
-    Mutates ``docs`` in place. Returns the number of documents augmented.
-    Safe no-op when the client is unavailable or PyMuPDF is missing.
+    Calls are bounded and concurrent for predictable latency. All failures are
+    safe no-ops; the deterministic text pipeline remains usable without VLM.
+    Returns the number of pages/documents successfully augmented.
     """
-    from .document_parser import DocSegment
     from . import llm as _llm
+    from . import llm_extract
 
-    # ``client`` (the judge client) gates whether the LLM layer is enabled at
-    # all; the actual OCR runs on the dedicated "vision" client (GPT when
-    # configured, else Claude).
     if client is None or not getattr(client, "available", False):
         return 0
     vision_client = _llm.get_client(role="vision")
     if not getattr(vision_client, "available", False):
         vision_client = client
+    if not getattr(vision_client, "available", False):
+        return 0
 
-    # Only act when the corpus lacks a real prose specification / email — this
-    # targets the drawings-only failure case without adding cost elsewhere.
-    # (Drawing/BLD "Supporting" text doesn't count: a busbar diagram with a few
-    # hundred chars of notes is not a specification.)
-    PROSE_THRESHOLD = 500
+    try:
+        max_pages = max(1, int(os.getenv("QUALITROL_VLM_OCR_MAX_PAGES", "12")))
+    except ValueError:
+        max_pages = 12
+    try:
+        concurrency = max(1, int(os.getenv("QUALITROL_VLM_OCR_CONCURRENCY", "4")))
+    except ValueError:
+        concurrency = 4
+
+    page_jobs: list[tuple[ParsedDocument, int]] = []
+    for doc in docs:
+        if doc.doc_type == "Drawing / SLD":
+            continue
+        candidates = _pdf_pages_requiring_vision(doc)
+        if len(candidates) > max_pages:
+            logging.warning(
+                "VLM OCR capped at %d/%d image-heavy pages for %s; set "
+                "QUALITROL_VLM_OCR_MAX_PAGES to raise the safety limit",
+                max_pages, len(candidates), doc.file_name,
+            )
+        page_jobs.extend((doc, page) for page in candidates[:max_pages])
+
+    def _read_page(job: tuple[ParsedDocument, int]) -> tuple[ParsedDocument, int, str]:
+        doc, page_index = job
+        image_b64 = _render_pdf_page_to_b64(
+            doc.file_path, page_index=page_index, dpi=300
+        )
+        if not image_b64:
+            return doc, page_index, ""
+        text = llm_extract.extract_document_page_text_vlm(
+            vision_client, image_b64, doc.file_name, page_index + 1
+        )
+        # If the dedicated vision deployment exhausts its retries, the judge
+        # client (Claude Opus) is an independent fail-safe for this page.
+        if (
+            not text
+            and client is not vision_client
+            and getattr(client, "available", False)
+        ):
+            text = llm_extract.extract_document_page_text_vlm(
+                client, image_b64, doc.file_name, page_index + 1
+            )
+        return doc, page_index, text or ""
+
+    if concurrency > 1 and len(page_jobs) > 1:
+        with ThreadPoolExecutor(
+            max_workers=min(concurrency, len(page_jobs))
+        ) as executor:
+            page_results = list(executor.map(_read_page, page_jobs))
+    else:
+        page_results = [_read_page(job) for job in page_jobs]
+
+    augmented = 0
+    for doc, page_index, text in page_results:
+        if text:
+            _inject_page_ocr(doc, page_index + 1, text)
+            augmented += 1
+        else:
+            logging.warning(
+                "VLM OCR returned no text for %s page %d; native text remains",
+                doc.file_name, page_index + 1,
+            )
+
+    # Preserve the original drawing-only augmentation. A real prose spec/email
+    # means drawings do not need this extra scenario-detection OCR pass.
     prose_chars = sum(
         len(d.full_text)
         for d in docs
         if d.doc_type in ("Project Specification", "Raw Email")
     )
-    if prose_chars >= PROSE_THRESHOLD:
-        return 0
-
-    from . import llm_extract
-
-    augmented = 0
-    for doc in docs:
-        if doc.doc_type != "Drawing / SLD":
-            continue
-        if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
-            continue
-        # Render at high DPI but cap the long edge (see _render_pdf_page_to_b64)
-        # so large-format / scanned SLDs are accepted by the vision model.
-        image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=300)
-        if not image_b64:
-            continue
-        text = llm_extract.extract_sld_text_vlm(vision_client, image_b64, doc.file_name)
-        if not text:
-            continue
-        doc.segments.append(
-            DocSegment(location="VLM drawing text (page 1)", text=text)
-        )
-        augmented += 1
+    if prose_chars < 500:
+        for doc in docs:
+            if doc.doc_type != "Drawing / SLD":
+                continue
+            if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
+                continue
+            image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=300)
+            if not image_b64:
+                continue
+            text = llm_extract.extract_sld_text_vlm(
+                vision_client, image_b64, doc.file_name
+            )
+            if not text:
+                continue
+            doc.segments.append(
+                DocSegment(location="VLM drawing text (page 1)", text=text)
+            )
+            augmented += 1
     return augmented
+
+
+def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
+    """Backward-compatible alias for the expanded image-text augmentation."""
+    return augment_docs_with_image_text(docs, client)
 
 
 def _merge_assets(

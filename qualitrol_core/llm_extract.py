@@ -16,11 +16,23 @@ Used by:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from . import matching
 from .document_parser import ParsedDocument
 from .schemas import DrawingAsset
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read a small integer tuning knob from the environment (fail-safe)."""
+    try:
+        return int((os.getenv(name) or "").strip())
+    except (TypeError, ValueError):
+        return default
 
 _VALID_REQ_TYPES = {"Must-have", "Preferred", "Reference", "Quantity Basis", "Unknown"}
 
@@ -100,7 +112,7 @@ def build_context(docs: list[ParsedDocument], max_chars: int = 9000) -> str:
 # catalog directly, WITHOUT scenario-keyword matching.
 #
 # Motivation: the scenario/synonym keyword vocabulary is broad and over-matches
-# non-requirement fragments. This path hands the GPT analysis engine the
+# non-requirement fragments. This path hands the analysis LLM the
 # controlled Product Family + Product Model catalog (plus the metric dictionary)
 # and asks it to read the customer documents and pin down (1) which product
 # families/models are genuinely in scope and (2) the specific, valuable stated
@@ -171,6 +183,163 @@ def _grounded_chunks(
         if buf:
             chunks.append(header + "\n".join(buf))
     return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Keyword-anchored region selection (hybrid prefilter for grounded mode)
+# --------------------------------------------------------------------------- #
+# Instead of reading every page of a long tender with the LLM locator, use the
+# deterministic controlled-term net to LOCATE the candidate regions, expand each
+# by a few neighbouring segments for context, drop table-of-contents pages, and
+# only send those regions to the model. The keyword net is deliberately a HIGH-
+# RECALL selector here (precision is still the model's job inside each region),
+# so we cut the model's input volume / call count without dropping requirements.
+# A coverage guard + empty-result fallback (in ``locate_requirements_grounded``)
+# revert to reading the whole document whenever the prefilter would not help.
+_ANCHOR_MIN_LEN = 2
+
+
+def _anchor_terms(dp) -> list[str]:
+    """Distinctive controlled terms used to anchor candidate regions.
+
+    Mapped synonym raw-terms plus each scenario's NON-ambiguous keywords. Generic
+    ambiguous keywords (relay/alarm/voltage/current/...) are excluded on purpose:
+    as a region net we want recall, but a term that matches nearly every page
+    (so it cannot discriminate a region) is worthless for locating one. Those
+    weak terms are still judged by the model inside the selected regions.
+    """
+    terms: set[str] = set()
+    for scenario in dp.scenarios.values():
+        for kw in scenario.keywords:
+            k = (kw or "").strip().lower()
+            if len(k) >= _ANCHOR_MIN_LEN and not matching.is_ambiguous_keyword(k):
+                terms.add(k)
+    for syn in dp.synonyms:
+        t = (syn.raw_term or "").strip().lower()
+        if len(t) >= _ANCHOR_MIN_LEN:
+            terms.add(t)
+    # Longest first so a multi-word phrase anchors before its substrings.
+    return sorted(terms, key=len, reverse=True)
+
+
+def _find_anchor_term(text_lower: str, term: str) -> int:
+    """Locate an anchor as a lexical term, allowing only a simple plural.
+
+    ``matching.find_term`` intentionally uses substring matching for long terms,
+    which is useful during broad evidence extraction but too noisy for region
+    selection: the valid product name ``INFORMA`` would match ``information``.
+    Anchors therefore require alphanumeric boundaries. A trailing ``s``/``es``
+    remains acceptable so singular catalog terms still locate plural prose.
+    """
+    value = (term or "").strip().lower()
+    if not value:
+        return -1
+    prefix = r"(?<![a-z0-9])" if value[0].isalnum() else ""
+    suffix = r"(?:s|es)?(?![a-z0-9])" if value[-1].isalnum() else ""
+    match = re.search(prefix + re.escape(value) + suffix, text_lower)
+    return match.start() if match else -1
+
+
+def _segment_is_anchor(text: str, terms: list[str]) -> bool:
+    """True if a segment carries a distinctive term that is not out-of-scope."""
+    text_lower = text.lower()
+    for term in terms:
+        idx = _find_anchor_term(text_lower, term)
+        if idx >= 0 and not matching.in_exclusion_context(text, idx):
+            return True
+    return False
+
+
+def _merge_intervals(idxs: list[int], radius: int, n: int) -> list[tuple[int, int]]:
+    """Expand each anchor index by +/- ``radius`` segments and merge overlaps."""
+    if not idxs:
+        return []
+    spans = [(max(0, i - radius), min(n - 1, i + radius)) for i in sorted(idxs)]
+    merged = [spans[0]]
+    for lo, hi in spans[1:]:
+        plo, phi = merged[-1]
+        if lo <= phi + 1:  # overlapping or directly adjacent -> one region
+            merged[-1] = (plo, max(phi, hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _doc_context(seg_count: int, char_count: int, override: int | None) -> int:
+    """Neighbouring-segment radius to keep around each anchor for THIS doc.
+
+    Adaptive to segment granularity: a page-based doc (PDF) already carries a
+    full page of context per segment, so radius 0 keeps only the signal pages; a
+    paragraph-based doc (docx/txt) has tiny segments, so we widen the window to
+    keep the sentences around each hit. An explicit env override wins.
+    """
+    if override is not None:
+        return override
+    avg = char_count / max(1, seg_count)
+    return 0 if avg >= 1000 else 2
+
+
+def _anchored_chunks(
+    docs: list[ParsedDocument], dp, *, chunk_chars: int = 40000,
+    context: int | None = None,
+) -> tuple[list[str], dict]:
+    """Keyword-anchored region chunks for the grounded locator.
+
+    Returns ``(chunks, stats)`` where ``stats`` reports how much of the prose
+    corpus survived the prefilter (so the caller can apply a coverage guard and
+    log the reduction). Chunk packing mirrors ``_grounded_chunks`` so the model
+    sees the same shape; only the *selection* of text differs. ``context`` is the
+    neighbouring-segment radius kept around each anchor; ``None`` picks it per
+    doc from segment granularity (see ``_doc_context``). Drawing/SLD docs keep
+    the same trimmed sample (their content is read by the VLM path).
+    """
+    terms = _anchor_terms(dp)
+    ordered = sorted(docs, key=lambda d: d.doc_type == "Drawing / SLD")
+    chunks: list[str] = []
+    stats = {
+        "total_chars": 0, "selected_chars": 0,
+        "total_segments": 0, "anchor_segments": 0, "selected_segments": 0,
+    }
+    for doc in ordered:
+        header = f"----- DOCUMENT: {doc.file_name} ({doc.doc_type}) -----\n"
+        if doc.doc_type == "Drawing / SLD":
+            sample = doc.full_text[:1500].strip()
+            if sample:
+                chunks.append(header + sample)
+            continue
+        segs = doc.segments
+        n = len(segs)
+        doc_chars = sum(len(s.text) for s in segs)
+        stats["total_segments"] += n
+        stats["total_chars"] += doc_chars
+        anchor_idx = [
+            i for i, seg in enumerate(segs)
+            if seg.text.strip() and (
+                "[VLM OCR of embedded image]" in seg.text
+                or _segment_is_anchor(seg.text, terms)
+            )
+        ]
+        stats["anchor_segments"] += len(anchor_idx)
+        if not anchor_idx:
+            continue
+        radius = _doc_context(n, doc_chars, context)
+        buf: list[str] = []
+        buf_len = 0
+        for lo, hi in _merge_intervals(anchor_idx, radius, n):
+            for i in range(lo, hi + 1):
+                seg_text = segs[i].text.strip()
+                if not seg_text or looks_like_table_of_contents(segs[i].text):
+                    continue
+                stats["selected_segments"] += 1
+                stats["selected_chars"] += len(seg_text)
+                if buf and buf_len + len(seg_text) > chunk_chars:
+                    chunks.append(header + "\n".join(buf))
+                    buf, buf_len = [], 0
+                buf.append(seg_text)
+                buf_len += len(seg_text) + 1
+        if buf:
+            chunks.append(header + "\n".join(buf))
+    return chunks, stats
 
 
 def _parse_grounded_response(data: dict, dp) -> tuple[list[dict], list[dict]]:
@@ -279,7 +448,7 @@ def locate_requirements_grounded(
     client, dp, docs: list[ParsedDocument],
     extra_instructions: str = "", chunk_chars: int = 40000,
 ) -> Optional[dict]:
-    """GPT-driven, catalog-grounded requirement & product locator (Step 1).
+    """LLM-driven, catalog-grounded requirement & product locator (Step 1).
 
     Reads the WHOLE of every document via a chunked map-reduce: each page/segment
     chunk is analysed against the full controlled catalog and the per-chunk
@@ -302,7 +471,44 @@ def locate_requirements_grounded(
         {"metric_id": m.metric_id, "name": m.standard_name, "unit": m.unit}
         for m in dp.metrics.values()
     ]
-    chunks = _grounded_chunks(docs, chunk_chars=chunk_chars)
+    # Keyword-anchored prefilter (default on): locate candidate regions with the
+    # controlled-term net and only send those to the LLM. Falls back to reading
+    # the whole document when the prefilter finds nothing or would not meaningfully
+    # reduce the volume (coverage guard), so recall is never sacrificed for speed.
+    # Only large tenders are worth prefiltering: a small/medium spec is ~1 LLM
+    # call already, so reading it whole is fast AND avoids the recall risk of a
+    # keyword net (fragmented tables, junk-term hits, image-only pages) dropping
+    # the wrong pages. Gate on an absolute prose size, not just a coverage ratio.
+    prose_chars = sum(
+        len(d.full_text) for d in docs if d.doc_type != "Drawing / SLD"
+    )
+    min_chars = _int_env("QUALITROL_GROUNDED_MIN_CHARS", 80000)
+    chunks: list[str] = []
+    if os.getenv("QUALITROL_GROUNDED_ANCHORED", "1") != "0" and prose_chars > min_chars:
+        raw_ctx = (os.getenv("QUALITROL_GROUNDED_CONTEXT") or "").strip()
+        context = max(0, int(raw_ctx)) if raw_ctx.isdigit() else None
+        a_chunks, stats = _anchored_chunks(
+            docs, dp, chunk_chars=chunk_chars, context=context
+        )
+        total = stats["total_chars"] or 1
+        coverage = stats["selected_chars"] / total
+        if a_chunks and coverage <= 0.80:
+            chunks = a_chunks
+            logging.info(
+                "grounded prefilter=anchored: %d/%d segments, %d/%d chars "
+                "(%.0f%% kept), %d LLM chunks",
+                stats["selected_segments"], stats["total_segments"],
+                stats["selected_chars"], stats["total_chars"], coverage * 100,
+                len(a_chunks),
+            )
+        else:
+            logging.info(
+                "grounded prefilter skipped (coverage=%.0f%%, anchored_chunks=%d)"
+                " -> reading full document",
+                coverage * 100, len(a_chunks),
+            )
+    if not chunks:
+        chunks = _grounded_chunks(docs, chunk_chars=chunk_chars)
     if not chunks:
         return None
 
@@ -356,20 +562,37 @@ def locate_requirements_grounded(
         '"evidence_quote":"","confidence":0.0,"rationale":"one sentence"}]}'
     )
 
-    all_products: list[dict] = []
-    all_reqs: list[dict] = []
-    for i, chunk in enumerate(chunks, start=1):
+    total_chunks = len(chunks)
+
+    def _run_chunk(job: tuple[int, str]) -> Optional[dict]:
+        i, chunk = job
         user = (
             catalog_block
-            + f"\n\nCustomer project documents (part {i} of {len(chunks)}):\n"
+            + f"\n\nCustomer project documents (part {i} of {total_chunks}):\n"
             + chunk
             + return_form
         )
         try:
             data = client.complete_json(system, user, max_tokens=8192)
         except Exception:  # noqa: BLE001 - fail safe: skip this chunk, keep others
-            continue
-        if not isinstance(data, dict):
+            return None
+        return data if isinstance(data, dict) else None
+
+    # Chunks are independent, so fan them out concurrently (the Responses client
+    # is synchronous but thread-safe for parallel requests) to cut wall-clock
+    # time on long tenders. Set QUALITROL_GROUNDED_CONCURRENCY=1 to serialise.
+    jobs = list(enumerate(chunks, start=1))
+    max_workers = max(1, _int_env("QUALITROL_GROUNDED_CONCURRENCY", 4))
+    if max_workers > 1 and total_chunks > 1:
+        with ThreadPoolExecutor(max_workers=min(max_workers, total_chunks)) as ex:
+            responses = list(ex.map(_run_chunk, jobs))
+    else:
+        responses = [_run_chunk(job) for job in jobs]
+
+    all_products: list[dict] = []
+    all_reqs: list[dict] = []
+    for data in responses:
+        if not data:
             continue
         prods, reqs = _parse_grounded_response(data, dp)
         all_products.extend(prods)
@@ -891,6 +1114,49 @@ _VALID_ASSET_TYPES = {
     "Earthing Switch",
 }
 _VALID_STATUS = {"New", "Existing", "Future", "Provision", "Unclear"}
+
+
+def extract_document_page_text_vlm(
+    client,
+    image_b64: str,
+    document_id: str,
+    page_number: int,
+) -> Optional[str]:
+    """Faithfully transcribe a specification page whose content is image-only.
+
+    This differs from ``extract_sld_text_vlm``: it preserves all scope,
+    requirement, quantity, parameter and exclusion language instead of selecting
+    drawing labels. The text is injected back into the parsed page so the normal
+    grounded locator and rules engine can process it. Returns ``None`` on any
+    failure.
+    """
+    if not client.available:
+        return None
+
+    system = (
+        "You are performing OCR on one page of a customer technical document for "
+        "a quotation workflow. Transcribe ALL visible substantive text faithfully, "
+        "especially scope of supply, technical requirements, quantities, units, "
+        "standards, product or asset names, exclusions, tables and notes. Preserve "
+        "table rows in readable plain text and keep section/row order. Ignore only "
+        "repeated company letterheads, page numbers and decorative elements. Do not "
+        "summarize, interpret, translate or invent missing text. If text is unclear, "
+        "mark the fragment [unclear]. Respond with STRICT JSON only."
+    )
+    user = (
+        f"Document: {document_id}; page: {page_number}. "
+        'Return JSON exactly as {"text":"faithful transcription"}'
+    )
+    try:
+        data = client.complete_json_with_image(
+            system, user, image_b64, max_tokens=8192
+        )
+    except Exception:  # noqa: BLE001 - optional augmentation must fail safe
+        return None
+    if not isinstance(data, dict):
+        return None
+    text = str(data.get("text", "")).strip()
+    return text or None
 
 
 def extract_sld_text_vlm(

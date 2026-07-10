@@ -13,8 +13,8 @@ file-name + page-number evidence trail.
 
 Flow per PDF:
     pypdf text extraction (page-tagged)
-      -> LLM structuring     (GPT "bulk" role -> models + parameters JSON;
-                              falls back to Claude when GPT is not configured)
+      -> LLM structuring     (Claude "bulk" role, Sonnet-5 -> models +
+                              parameters JSON; rules-only when no LLM configured)
       -> map to Metric IDs   (controlled sheet 04; unmapped -> Unmapped list)
       -> aggregate candidate catalog
 
@@ -333,8 +333,8 @@ def run(paths: list[Path], output_dir: str | Path | None = None,
 
     output_dir = Path(output_dir) if output_dir else config.OUTPUT_DIR / "_pdf_catalog"
     dp = load_data_package()
-    # High-volume, well-bounded structured extraction -> GPT ("bulk" role);
-    # falls back to Claude when no GPT endpoint is configured.
+    # High-volume, well-bounded structured extraction -> Claude "bulk" role
+    # (Sonnet-5); rules-only when no LLM is configured.
     llm_client = llm.get_client(role="bulk")
 
     results: list[PdfResult] = []
