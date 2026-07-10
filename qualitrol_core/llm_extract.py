@@ -65,6 +65,193 @@ def build_context(docs: list[ParsedDocument], max_chars: int = 9000) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Step 1 (grounded mode) - locate requirements & products from the family/model
+# catalog directly, WITHOUT scenario-keyword matching.
+#
+# Motivation: the scenario/synonym keyword vocabulary is broad and over-matches
+# non-requirement fragments. This path hands the GPT analysis engine the
+# controlled Product Family + Product Model catalog (plus the metric dictionary)
+# and asks it to read the customer documents and pin down (1) which product
+# families/models are genuinely in scope and (2) the specific, valuable stated
+# requirements — each grounded in a verbatim quote so we can relocate it in the
+# source for the Spec Review UI. Everything is validated against the catalog so
+# free text can never inject un-grounded families/models/metrics.
+# --------------------------------------------------------------------------- #
+def _families_context(dp) -> list[dict]:
+    return [
+        {
+            "family_id": f.family_id,
+            "family_name": f.family_name,
+            "product_line": f.product_line,
+            "primary_asset_type": f.primary_asset_type,
+            "capabilities": f.typical_capabilities,
+            "applicable_scenarios": list(f.applicable_scenarios),
+        }
+        for f in dp.families.values()
+    ]
+
+
+def _products_context(dp) -> list[dict]:
+    return [
+        {
+            "product_id": p.product_id,
+            "model": p.model,
+            "family_id": p.family_id,
+            "description": p.description,
+            "standards": p.supported_standards,
+            "protocols": p.protocols,
+        }
+        for p in dp.products.values()
+    ]
+
+
+def locate_requirements_grounded(
+    client, dp, docs: list[ParsedDocument],
+    extra_instructions: str = "", max_context_chars: int = 16000,
+) -> Optional[dict]:
+    """GPT-driven, catalog-grounded requirement & product locator (Step 1).
+
+    Returns ``{"products": [...], "requirements": [...]}`` validated against the
+    controlled Product Family / Product Model / Metric catalogs, or ``None`` when
+    the LLM is unavailable or the response is unusable (caller falls back to the
+    keyword engine). Every item carries a verbatim ``evidence_quote`` the caller
+    relocates in the source documents for traceability.
+    """
+    if not client.available:
+        return None
+
+    families = _families_context(dp)
+    products = _products_context(dp)
+    metrics = [
+        {"metric_id": m.metric_id, "name": m.standard_name, "unit": m.unit}
+        for m in dp.metrics.values()
+    ]
+    context = build_context(docs, max_chars=max_context_chars)
+    if not context.strip():
+        return None
+
+    system = (
+        "You are a senior Qualitrol application engineer doing quotation take-off. "
+        "You are given the customer's project documents plus Qualitrol's CONTROLLED "
+        "catalog of Product Families and Product Models (and a metric dictionary). "
+        "Your job is to read the documents and pin down, precisely:\n"
+        "  (1) which Qualitrol product families/models are GENUINELY required by "
+        "THIS project, and\n"
+        "  (2) the specific, valuable technical REQUIREMENTS stated in the documents "
+        "that justify those products or map to a controlled metric.\n\n"
+        "Hard rules:\n"
+        "- Ground every item in the documents. Provide a short VERBATIM quote "
+        "(copied exactly from the text, <=200 chars) as evidence for each item. "
+        "Never invent products, metrics, or values.\n"
+        "- Use ONLY family_id / product_id / metric_id values from the provided "
+        "catalog. If a requirement fits a family but no specific model, give the "
+        "family_id and leave product_id empty.\n"
+        "- Be precise, not exhaustive: include an item only if the text genuinely "
+        "supports Qualitrol supplying/monitoring it in THIS project. IGNORE generic "
+        "background, and IGNORE anything the text marks as out-of-scope, future, "
+        "provision, optional, or supplied by another party.\n"
+        "- A component of the plant being monitored (e.g. a breaker/CT/VT that is "
+        "part of the GIS) is NOT itself a monitoring product unless the customer "
+        "asks to MONITOR it.\n"
+        "Respond with STRICT JSON only."
+    )
+    system = _with_extra_rules(system, extra_instructions)
+    user = (
+        "Controlled Product Family catalog:\n"
+        + json.dumps(families, ensure_ascii=False)
+        + "\n\nControlled Product Model catalog:\n"
+        + json.dumps(products, ensure_ascii=False)
+        + "\n\nControlled Metric dictionary (map requirement values to these):\n"
+        + json.dumps(metrics, ensure_ascii=False)
+        + "\n\nCustomer project documents:\n"
+        + context
+        + "\n\nReturn JSON exactly of this form:\n"
+        '{"products":[{"product_id":"","family_id":"","in_scope":true,'
+        '"confidence":0.0,"evidence_quote":"","rationale":"one sentence"}],'
+        '"requirements":[{"family_id":"","product_id":"","metric_id":"","value":"",'
+        '"unit":"","requirement_type":"Must-have|Preferred|Reference|Quantity Basis",'
+        '"evidence_quote":"","confidence":0.0,"rationale":"one sentence"}]}'
+    )
+
+    try:
+        data = client.complete_json(system, user, max_tokens=8192)
+    except Exception:  # noqa: BLE001 - fail safe to keyword engine
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    valid_fam = set(dp.families.keys())
+    valid_prod = set(dp.products.keys())
+    valid_metric = set(dp.metrics.keys())
+
+    def _conf(v, default=0.6) -> float:
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return default
+
+    out_products: list[dict] = []
+    for item in data.get("products", []) or []:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("product_id", "")).strip()
+        fid = str(item.get("family_id", "")).strip()
+        if pid and pid not in valid_prod:
+            pid = ""
+        if pid and not fid:
+            fid = dp.products[pid].family_id
+        if fid and fid not in valid_fam:
+            fid = ""
+        if not fid and not pid:
+            continue
+        if item.get("in_scope") is False:
+            continue
+        out_products.append({
+            "product_id": pid,
+            "family_id": fid,
+            "confidence": _conf(item.get("confidence")),
+            "evidence_quote": str(item.get("evidence_quote", "")).strip()[:300],
+            "rationale": str(item.get("rationale", "")).strip(),
+        })
+
+    out_reqs: list[dict] = []
+    for item in data.get("requirements", []) or []:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("product_id", "")).strip()
+        fid = str(item.get("family_id", "")).strip()
+        if pid and pid not in valid_prod:
+            pid = ""
+        if pid and not fid:
+            fid = dp.products[pid].family_id
+        if fid and fid not in valid_fam:
+            fid = ""
+        mid = str(item.get("metric_id", "")).strip()
+        if mid and mid not in valid_metric:
+            mid = ""
+        if not fid and not pid and not mid:
+            continue
+        rtype = str(item.get("requirement_type", "")).strip()
+        if rtype not in _VALID_REQ_TYPES:
+            rtype = "Reference"
+        out_reqs.append({
+            "family_id": fid,
+            "product_id": pid,
+            "metric_id": mid,
+            "value": str(item.get("value", "")).strip(),
+            "unit": str(item.get("unit", "")).strip(),
+            "requirement_type": rtype,
+            "evidence_quote": str(item.get("evidence_quote", "")).strip()[:300],
+            "confidence": _conf(item.get("confidence")),
+            "rationale": str(item.get("rationale", "")).strip(),
+        })
+
+    if not out_products and not out_reqs:
+        return None
+    return {"products": out_products, "requirements": out_reqs}
+
+
+# --------------------------------------------------------------------------- #
 # Step 1 - scenario refinement
 # --------------------------------------------------------------------------- #
 def refine_scenarios(client, dp, evidence: list, detected: list[dict],

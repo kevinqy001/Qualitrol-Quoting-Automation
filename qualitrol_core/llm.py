@@ -9,6 +9,9 @@ The pipeline is rules-first and always works offline. Clients are selected by
   * ``"bulk"``  -> ``OpenAIFoundryClient`` (e.g. gpt-5.6-sol) for high-volume
     datasheet extraction (Step 0b).
   * ``"vision"`` -> ``OpenAIFoundryClient`` for SLD/drawing image analysis.
+  * ``"analyze"`` -> ``OpenAIFoundryClient`` (the project GPT) used as the Step 1
+    requirement/product locator that reads documents against the product
+    family/model catalog (replaces scenario-keyword matching).
 
 The GPT roles fall back to the Claude client when no GPT endpoint is configured,
 and everything falls back to ``NullLLMClient`` (rules-only) when no LLM is
@@ -360,7 +363,10 @@ class OpenAIFoundryClient:
 # --------------------------------------------------------------------------- #
 # Role-based client factory
 # --------------------------------------------------------------------------- #
-_ROLES = ("judge", "bulk", "vision")
+_ROLES = ("judge", "bulk", "vision", "analyze")
+# Roles that prefer the OpenAI/GPT client (falling back to Claude when no GPT
+# endpoint is configured).
+_GPT_ROLES = ("bulk", "vision", "analyze")
 _clients: dict[str, LLMClient] = {}
 
 
@@ -383,7 +389,7 @@ def _openai_client() -> LLMClient:
 
 
 def _build_client(role: str) -> LLMClient:
-    if role in ("bulk", "vision"):
+    if role in _GPT_ROLES:
         gpt = _openai_client()
         if not isinstance(gpt, NullLLMClient):
             return gpt

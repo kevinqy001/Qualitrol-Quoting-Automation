@@ -15,8 +15,19 @@ Inputs : a customer submission folder (Project Specification, Raw Email,
 Outputs: Extracted Evidence (sheet 12), Drawing Asset List (sheet 14) and
          Structured Requirements (sheet 13), written as JSON under outputs/.
 
-Rules-first and offline by default; the optional LLM hook only adds semantic
-extraction / explanations on top (see qualitrol_core.llm).
+Two extraction modes (same output contract, so Step 2 is unchanged):
+  * "grounded" (default when an analysis LLM is available) — the project GPT
+    reads the documents against the controlled Product Family + Product Model
+    catalog and pins down the in-scope products and valuable requirements
+    directly, each anchored to a verbatim quote. Scenario IDs are then derived
+    STRUCTURALLY from each family/model's applicable_scenarios (no keyword
+    matching). This avoids the broad scenario/synonym keyword vocabulary that
+    over-matches non-requirement fragments.
+  * "keyword" (offline fallback / comparison baseline) — the original rules-first
+    Scenario Master + Synonym Mapping keyword engine below.
+
+Select with QUALITROL_STEP1_MODE=grounded|keyword. Rules-first and offline by
+default: with the LLM disabled the keyword engine runs on its own.
 """
 
 from __future__ import annotations
@@ -673,6 +684,176 @@ def _combine_instructions(extra_rules: str, context_notes: str) -> str:
     return f"{extra_rules}\n\n{context_block}" if extra_rules else context_block
 
 
+# --------------------------------------------------------------------------- #
+# Grounded extraction mode (GPT + product family/model catalog, no scenario or
+# synonym keyword matching). See qualitrol_core.llm_extract.locate_requirements_
+# grounded. This is the default when the LLM is available; the keyword engine
+# above remains the offline fallback (QUALITROL_USE_LLM=0) and the comparison
+# baseline. Force a mode with QUALITROL_STEP1_MODE=grounded|keyword.
+# --------------------------------------------------------------------------- #
+def _locate_quote(quote: str, docs: list[ParsedDocument]):
+    """Relocate a GPT verbatim quote in the parsed documents.
+
+    Returns (source_document, location, line, snippet) or None. Whitespace is
+    treated flexibly (PDF text often wraps mid-sentence) and progressively
+    shorter prefixes are tried so a lightly paraphrased quote still anchors.
+    """
+    ql = (quote or "").strip()
+    if len(ql) < 6:
+        return None
+    for length in (len(ql), 160, 100, 60, 40):
+        frag = ql[:length].strip()
+        words = [w for w in frag.split() if w]
+        if len("".join(words)) < 6:
+            continue
+        try:
+            pattern = re.compile(r"\s+".join(re.escape(w) for w in words), re.IGNORECASE)
+        except re.error:
+            continue
+        for doc in docs:
+            for seg in doc.segments:
+                m = pattern.search(seg.text)
+                if m:
+                    idx = m.start()
+                    line = seg.text[:idx].count("\n") + 1
+                    return (doc.file_name, seg.location, line,
+                            matching.snippet(seg.text, idx))
+    return None
+
+
+def _grounded_extract(
+    client, dp: DataPackage, docs: list[ParsedDocument],
+    project_id: str, extra_rules: str,
+):
+    """GPT-driven, catalog-grounded Step 1 extraction.
+
+    Returns (detected, evidence, requirements, identified_products) in the SAME
+    shapes the keyword engine produces (so Step 2 is unchanged), or None when the
+    LLM returns nothing usable (caller falls back to the keyword engine).
+
+    Scenario IDs are derived STRUCTURALLY from each identified family/model's
+    ``applicable_scenarios`` (the family->scenario table), not from keyword
+    matching — that is the only place scenarios re-enter, purely to keep the
+    Step 1 -> Step 2 contract intact.
+    """
+    found = llm_extract.locate_requirements_grounded(
+        client, dp, docs, extra_instructions=extra_rules
+    )
+    if not found:
+        return None
+
+    evidence: list[Evidence] = []
+    ev_counter = 0
+    scen_conf: dict[str, float] = {}
+    scen_ev: dict[str, list[str]] = {}
+
+    def _scenarios_for(fid: str, pid: str) -> list[str]:
+        if pid and pid in dp.products and dp.products[pid].applicable_scenarios:
+            return dp.products[pid].applicable_scenarios
+        if fid and fid in dp.families:
+            return dp.families[fid].applicable_scenarios
+        return []
+
+    def _add_evidence(quote, sid, conf, note):
+        nonlocal ev_counter
+        ev_counter += 1
+        eid = f"EVD-{ev_counter:04d}"
+        loc = _locate_quote(quote, docs)
+        scen = dp.scenarios.get(sid)
+        if loc:
+            src, location, line, snippet = loc
+        else:
+            src, location, line, snippet = "", "LLM (unlocated)", 0, (quote or "")
+        evidence.append(Evidence(
+            evidence_id=eid, project_id=project_id, source_document=src,
+            location=location, line=line, evidence_text=snippet or (quote or ""),
+            scenario_id=sid, scenario=scen.application_scenario if scen else "",
+            asset_type=scen.asset_type if scen else "", asset_tag="",
+            confidence=round(conf, 3), notes=note,
+        ))
+        if sid:
+            scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
+            scen_ev.setdefault(sid, []).append(eid)
+        return eid
+
+    # 1) Identified products -> evidence + candidate scenarios.
+    identified_products: list[dict] = []
+    for p in found["products"]:
+        fid, pid = p["family_id"], p["product_id"]
+        sids = _scenarios_for(fid, pid)
+        fam = dp.families.get(fid)
+        primary_sid = sids[0] if sids else ""
+        _add_evidence(
+            p["evidence_quote"], primary_sid, p["confidence"],
+            f"GPT-identified product need. {p['rationale']}".strip(),
+        )
+        # Record every applicable scenario so Step 2 can match this family.
+        for sid in sids:
+            scen_conf[sid] = max(scen_conf.get(sid, 0.0), p["confidence"])
+            scen_ev.setdefault(sid, [])
+        identified_products.append({
+            "product_id": pid,
+            "model": dp.products[pid].model if pid in dp.products else "",
+            "family_id": fid,
+            "family_name": fam.family_name if fam else "",
+            "scenario_ids": sids,
+            "confidence": round(p["confidence"], 3),
+            "evidence_quote": p["evidence_quote"],
+            "rationale": p["rationale"],
+        })
+
+    # 2) Grounded requirements -> Requirement rows (+ their own evidence).
+    requirements: list[Requirement] = []
+    req_counter = 0
+    for r in found["requirements"]:
+        fid, pid, mid = r["family_id"], r["product_id"], r["metric_id"]
+        sids = _scenarios_for(fid, pid)
+        sid = next((s for s in sids if s in scen_conf), sids[0] if sids else "")
+        scen = dp.scenarios.get(sid)
+        metric = dp.metrics.get(mid) if mid else None
+        eid = _add_evidence(
+            r["evidence_quote"], sid, r["confidence"],
+            f"GPT-grounded requirement. {r['rationale']}".strip(),
+        )
+        req_counter += 1
+        requirements.append(Requirement(
+            requirement_id=f"REQ-{req_counter:04d}", project_id=project_id,
+            scenario_id=sid, scenario=scen.application_scenario if scen else "",
+            asset_type=scen.asset_type if scen else "", asset_tag="",
+            metric_id=mid, metric_name=metric.standard_name if metric else "",
+            parameter_value=r["value"],
+            unit=r["unit"] or (metric.unit if metric else ""),
+            requirement_type=r["requirement_type"], evidence_id=eid,
+            confidence=round(r["confidence"], 3),
+            missing_or_assumption=(
+                f"GPT-grounded: {r['rationale']}" if r["rationale"]
+                else "GPT-grounded requirement."
+            ),
+        ))
+
+    # 3) Build detected_scenarios from the structurally-derived scenario set.
+    detected: list[dict] = []
+    for sid, conf in scen_conf.items():
+        scen = dp.scenarios.get(sid)
+        if not scen:
+            continue
+        detected.append({
+            "scenario_id": sid,
+            "scenario": scen.application_scenario,
+            "asset_type": scen.asset_type,
+            "confidence": round(min(0.97, conf), 3),
+            "asset_corroborated": True,
+            "evidence_count": len(scen_ev.get(sid, [])),
+            "evidence_ids": scen_ev.get(sid, []),
+            "grounded": True,
+        })
+    detected.sort(key=lambda d: d["confidence"], reverse=True)
+
+    if not detected and not requirements:
+        return None
+    return detected, evidence, requirements, identified_products
+
+
 def run(
     project_dir: str | Path,
     project_id: str | None = None,
@@ -689,72 +870,101 @@ def run(
     dp = load_data_package()
     docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
 
+    # Judge client (Claude) for the keyword-mode augmentation + context directives;
+    # analyze client (project GPT) for the grounded requirement/product locator.
     client = llm.get_client()
+    analyze_client = llm.get_client(role="analyze")
     extra_rules = _combine_instructions(load_extraction_rules(), context_notes)
 
-    # --- P1-A: when a project supplies only drawings (no prose spec), use the
-    #     VLM to read the drawing's labels/titles and inject them as text so the
-    #     text-driven scenario detection below has scenario keywords to match. ---
-    sld_text_augmented = 0
-    if client.available:
-        sld_text_augmented = augment_docs_with_sld_text(docs, client)
+    # Extraction mode: grounded (GPT + family/model catalog, no scenario/synonym
+    # keyword matching) is the default when an analysis LLM is available; the
+    # keyword engine is the offline fallback and the comparison baseline. Force
+    # with QUALITROL_STEP1_MODE=grounded|keyword.
+    mode_env = (os.getenv("QUALITROL_STEP1_MODE") or "").strip().lower()
+    if mode_env in ("grounded", "keyword"):
+        requested_mode = mode_env
+    else:
+        requested_mode = "grounded" if analyze_client.available else "keyword"
 
-    corpus_lower = "\n".join(d.full_text for d in docs).lower()
-    evidence = extract_evidence(docs, dp, project_id)
-    detected = detect_scenarios(evidence, dp, corpus_lower)
+    # --- P1-A: when a project supplies only drawings (no prose spec), use the
+    #     VLM to read the drawing's labels/titles and inject them as text so both
+    #     the grounded locator and keyword detection have text to work with. ---
+    aug_client = client if client.available else analyze_client
+    sld_text_augmented = 0
+    if aug_client.available:
+        sld_text_augmented = augment_docs_with_sld_text(docs, aug_client)
 
     # --- Interpret the user's free-text context into structured directives that
-    #     BOTH steps can act on (exclude / include / quantity_hint / note). Kept
-    #     separate from scenario refinement so Step 2 can consume it too. ---
+    #     BOTH steps can act on (exclude / include / quantity_hint / note). ---
     context_directives: list[dict] = []
-    if client.available and (context_notes or "").strip():
+    ctx_client = client if client.available else analyze_client
+    if ctx_client.available and (context_notes or "").strip():
         directives = llm_extract.interpret_context(
-            client, dp, context_notes, extra_instructions=extra_rules
+            ctx_client, dp, context_notes, extra_instructions=extra_rules
         )
         if directives:
             context_directives = directives
 
-    # --- LLM augmentation: refine scenarios (precision) before requirements ---
     llm_used = False
     llm_dropped: list[dict] = []
-    if client.available:
-        refinement = llm_extract.refine_scenarios(
-            client, dp, evidence, detected, extra_instructions=extra_rules
-        )
-        if refinement:
-            llm_used = True
-            detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
+    used_mode = "keyword"
+    identified_products: list[dict] = []
 
-    # Honour explicit user "include" directives: if the operator asked for a
-    # scenario the evidence did not surface, add it (flagged, Needs-Review
-    # confidence) so requirement extraction and Step 2 matching pick it up.
+    # --- Grounded mode: GPT locates requirements/products from the family/model
+    #     catalog; scenarios are derived structurally (no keyword matching). ---
+    if requested_mode == "grounded" and analyze_client.available:
+        grounded = _grounded_extract(analyze_client, dp, docs, project_id, extra_rules)
+        if grounded:
+            detected, evidence, requirements, identified_products = grounded
+            used_mode = "grounded"
+            llm_used = True
+
+    # --- Keyword mode (fallback / forced): scenario + synonym matching. ---
+    if used_mode == "keyword":
+        corpus_lower = "\n".join(d.full_text for d in docs).lower()
+        evidence = extract_evidence(docs, dp, project_id)
+        detected = detect_scenarios(evidence, dp, corpus_lower)
+        if client.available:
+            refinement = llm_extract.refine_scenarios(
+                client, dp, evidence, detected, extra_instructions=extra_rules
+            )
+            if refinement:
+                llm_used = True
+                detected, llm_dropped = _merge_scenarios(detected, refinement, dp)
+
+    # Honour explicit user "include" directives in both modes.
     _apply_include_directives(detected, context_directives, dp)
 
-    drawing_assets = extract_drawing_assets(docs, project_id, llm_client=client)
-    requirements = extract_requirements(
-        docs, evidence, detected, drawing_assets, dp, project_id
-    )
+    drawing_assets = extract_drawing_assets(docs, project_id, llm_client=aug_client)
 
-    # --- LLM augmentation: fill / add requirement values ---
-    if client.available:
-        llm_reqs = llm_extract.extract_requirements(
-            client, dp, detected, docs, extra_instructions=extra_rules
+    # Keyword mode fills requirement values from the rules + LLM metric search.
+    # Grounded mode already produced requirements; quantities are derived
+    # downstream in Step 2 from the drawing_asset_list + quantity rules.
+    if used_mode == "keyword":
+        requirements = extract_requirements(
+            docs, evidence, detected, drawing_assets, dp, project_id
         )
-        if llm_reqs:
-            llm_used = True
-            requirements = _merge_requirements(
-                requirements, llm_reqs, detected, evidence, dp, project_id
+        if client.available:
+            llm_reqs = llm_extract.extract_requirements(
+                client, dp, detected, docs, extra_instructions=extra_rules
             )
+            if llm_reqs:
+                llm_used = True
+                requirements = _merge_requirements(
+                    requirements, llm_reqs, detected, evidence, dp, project_id
+                )
 
+    active_client = analyze_client if used_mode == "grounded" else client
     result = {
         "project_id": project_id,
         "step": "1_extract_info",
+        "extraction_mode": used_mode,
         "llm": {
             "enabled": config.SETTINGS.use_llm,
-            "available": client.available,
+            "available": active_client.available,
             "used": llm_used,
             "provider": config.SETTINGS.llm_provider,
-            "model": config.SETTINGS.llm_deployment if client.available else None,
+            "model": getattr(active_client, "deployment", None) if active_client.available else None,
             "extra_rules_applied": bool(extra_rules),
             "user_context_applied": bool((context_notes or "").strip()),
             "scenarios_dropped_by_llm": llm_dropped,
@@ -762,6 +972,7 @@ def run(
         },
         "user_context": (context_notes or "").strip(),
         "context_directives": context_directives,
+        "identified_products": identified_products,
         "documents": [
             {"file_name": d.file_name, "doc_type": d.doc_type,
              "segments": len(d.segments)}
