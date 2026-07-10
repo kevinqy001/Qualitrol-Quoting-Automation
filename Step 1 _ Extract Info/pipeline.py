@@ -712,6 +712,10 @@ def _locate_quote(quote: str, docs: list[ParsedDocument]):
             continue
         for doc in docs:
             for seg in doc.segments:
+                # Never anchor evidence to a table-of-contents / index page: those
+                # list where requirements live, not the requirements themselves.
+                if llm_extract.looks_like_table_of_contents(seg.text):
+                    continue
                 m = pattern.search(seg.text)
                 if m:
                     idx = m.start()

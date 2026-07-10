@@ -16,12 +16,43 @@ Used by:
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from .document_parser import ParsedDocument
 from .schemas import DrawingAsset
 
 _VALID_REQ_TYPES = {"Must-have", "Preferred", "Reference", "Quantity Basis", "Unknown"}
+
+# A table-of-contents / index line: a section number (or dotted leaders) followed
+# by a title and a trailing page number, e.g. "3.3.1.16 HVAC system 39" or
+# "2.2  General Requirements ......... 7". These pages list *where* requirements
+# live, not the requirements themselves, so they must never become evidence.
+_TOC_LINE_RE = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s+.+?\s+\d{1,4}\s*$")
+_TOC_LEADER_RE = re.compile(r"\.{3,}\s*\d{1,4}\s*$")
+
+
+def looks_like_table_of_contents(text: str) -> bool:
+    """Heuristic: is this segment a table-of-contents / index page?
+
+    A TOC page is dominated by "section title + page number" lines (optionally
+    with dot leaders). Requirement body pages are prose and rarely trip this, so
+    we require both a high ratio *and* an absolute count of such lines to avoid
+    dropping a genuine content page that happens to contain a short numbered
+    list. The explicit "table of contents" heading is a strong signal on its own
+    once a few index-style lines are present.
+    """
+    if not text:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 6:
+        return False
+    hits = sum(
+        1 for ln in lines if _TOC_LINE_RE.match(ln) or _TOC_LEADER_RE.search(ln)
+    )
+    if "table of contents" in text.lower() and hits >= 3:
+        return True
+    return hits >= 6 and hits / len(lines) >= 0.5
 
 
 def _with_extra_rules(system: str, extra_instructions: str) -> str:
@@ -105,81 +136,49 @@ def _products_context(dp) -> list[dict]:
     ]
 
 
-def locate_requirements_grounded(
-    client, dp, docs: list[ParsedDocument],
-    extra_instructions: str = "", max_context_chars: int = 16000,
-) -> Optional[dict]:
-    """GPT-driven, catalog-grounded requirement & product locator (Step 1).
+def _grounded_chunks(
+    docs: list[ParsedDocument], chunk_chars: int = 40000
+) -> list[str]:
+    """Split the FULL customer documents into page/segment-aligned text chunks.
 
-    Returns ``{"products": [...], "requirements": [...]}`` validated against the
-    controlled Product Family / Product Model / Metric catalogs, or ``None`` when
-    the LLM is unavailable or the response is unusable (caller falls back to the
-    keyword engine). Every item carries a verbatim ``evidence_quote`` the caller
-    relocates in the source documents for traceability.
+    Unlike ``build_context`` (which truncates each doc to a few thousand chars —
+    enough to only ever see a long tender's cover + table of contents), this
+    walks every segment so the whole body reaches the model across successive
+    chunks. Cover/index noise is removed by dropping table-of-contents pages, and
+    Drawing/SLD docs are trimmed hard (their content is read by the VLM path, not
+    here). Chunks are never split mid-page so a verbatim quote can be relocated.
     """
-    if not client.available:
-        return None
+    ordered = sorted(docs, key=lambda d: d.doc_type == "Drawing / SLD")
+    chunks: list[str] = []
+    for doc in ordered:
+        header = f"----- DOCUMENT: {doc.file_name} ({doc.doc_type}) -----\n"
+        if doc.doc_type == "Drawing / SLD":
+            sample = doc.full_text[:1500].strip()
+            if sample:
+                chunks.append(header + sample)
+            continue
+        buf: list[str] = []
+        buf_len = 0
+        for seg in doc.segments:
+            seg_text = seg.text.strip()
+            if not seg_text or looks_like_table_of_contents(seg.text):
+                continue
+            if buf and buf_len + len(seg_text) > chunk_chars:
+                chunks.append(header + "\n".join(buf))
+                buf, buf_len = [], 0
+            buf.append(seg_text)
+            buf_len += len(seg_text) + 1
+        if buf:
+            chunks.append(header + "\n".join(buf))
+    return chunks
 
-    families = _families_context(dp)
-    products = _products_context(dp)
-    metrics = [
-        {"metric_id": m.metric_id, "name": m.standard_name, "unit": m.unit}
-        for m in dp.metrics.values()
-    ]
-    context = build_context(docs, max_chars=max_context_chars)
-    if not context.strip():
-        return None
 
-    system = (
-        "You are a senior Qualitrol application engineer doing quotation take-off. "
-        "You are given the customer's project documents plus Qualitrol's CONTROLLED "
-        "catalog of Product Families and Product Models (and a metric dictionary). "
-        "Your job is to read the documents and pin down, precisely:\n"
-        "  (1) which Qualitrol product families/models are GENUINELY required by "
-        "THIS project, and\n"
-        "  (2) the specific, valuable technical REQUIREMENTS stated in the documents "
-        "that justify those products or map to a controlled metric.\n\n"
-        "Hard rules:\n"
-        "- Ground every item in the documents. Provide a short VERBATIM quote "
-        "(copied exactly from the text, <=200 chars) as evidence for each item. "
-        "Never invent products, metrics, or values.\n"
-        "- Use ONLY family_id / product_id / metric_id values from the provided "
-        "catalog. If a requirement fits a family but no specific model, give the "
-        "family_id and leave product_id empty.\n"
-        "- Be precise, not exhaustive: include an item only if the text genuinely "
-        "supports Qualitrol supplying/monitoring it in THIS project. IGNORE generic "
-        "background, and IGNORE anything the text marks as out-of-scope, future, "
-        "provision, optional, or supplied by another party.\n"
-        "- A component of the plant being monitored (e.g. a breaker/CT/VT that is "
-        "part of the GIS) is NOT itself a monitoring product unless the customer "
-        "asks to MONITOR it.\n"
-        "Respond with STRICT JSON only."
-    )
-    system = _with_extra_rules(system, extra_instructions)
-    user = (
-        "Controlled Product Family catalog:\n"
-        + json.dumps(families, ensure_ascii=False)
-        + "\n\nControlled Product Model catalog:\n"
-        + json.dumps(products, ensure_ascii=False)
-        + "\n\nControlled Metric dictionary (map requirement values to these):\n"
-        + json.dumps(metrics, ensure_ascii=False)
-        + "\n\nCustomer project documents:\n"
-        + context
-        + "\n\nReturn JSON exactly of this form:\n"
-        '{"products":[{"product_id":"","family_id":"","in_scope":true,'
-        '"confidence":0.0,"evidence_quote":"","rationale":"one sentence"}],'
-        '"requirements":[{"family_id":"","product_id":"","metric_id":"","value":"",'
-        '"unit":"","requirement_type":"Must-have|Preferred|Reference|Quantity Basis",'
-        '"evidence_quote":"","confidence":0.0,"rationale":"one sentence"}]}'
-    )
+def _parse_grounded_response(data: dict, dp) -> tuple[list[dict], list[dict]]:
+    """Validate one grounded LLM JSON response against the controlled catalog.
 
-    try:
-        data = client.complete_json(system, user, max_tokens=8192)
-    except Exception:  # noqa: BLE001 - fail safe to keyword engine
-        return None
-    if not isinstance(data, dict):
-        return None
-
+    Returns ``(products, requirements)`` with only catalog-valid family/product/
+    metric ids kept. Shared by every chunk in the map-reduce locator.
+    """
     valid_fam = set(dp.families.keys())
     valid_prod = set(dp.products.keys())
     valid_metric = set(dp.metrics.keys())
@@ -246,9 +245,140 @@ def locate_requirements_grounded(
             "rationale": str(item.get("rationale", "")).strip(),
         })
 
-    if not out_products and not out_reqs:
+    return out_products, out_reqs
+
+
+def _merge_grounded(
+    products: list[dict], requirements: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """De-duplicate products/requirements gathered across chunks, keeping the
+    highest-confidence instance of each (a product/requirement can legitimately
+    be quoted on several pages)."""
+    prod_by_key: dict[tuple, dict] = {}
+    for p in products:
+        key = (p["family_id"], p["product_id"])
+        cur = prod_by_key.get(key)
+        if cur is None or p["confidence"] > cur["confidence"]:
+            prod_by_key[key] = p
+
+    req_by_key: dict[tuple, dict] = {}
+    for r in requirements:
+        key = (r["family_id"], r["product_id"], r["metric_id"],
+               r["value"].strip().lower())
+        cur = req_by_key.get(key)
+        if cur is None or r["confidence"] > cur["confidence"]:
+            req_by_key[key] = r
+
+    merged_products = sorted(prod_by_key.values(),
+                             key=lambda x: -x["confidence"])
+    merged_reqs = sorted(req_by_key.values(), key=lambda x: -x["confidence"])
+    return merged_products, merged_reqs
+
+
+def locate_requirements_grounded(
+    client, dp, docs: list[ParsedDocument],
+    extra_instructions: str = "", chunk_chars: int = 40000,
+) -> Optional[dict]:
+    """GPT-driven, catalog-grounded requirement & product locator (Step 1).
+
+    Reads the WHOLE of every document via a chunked map-reduce: each page/segment
+    chunk is analysed against the full controlled catalog and the per-chunk
+    findings are merged. This replaces the previous single truncated call, which
+    only ever saw a long tender's cover + table of contents and therefore
+    anchored all "evidence" to the index page.
+
+    Returns ``{"products": [...], "requirements": [...]}`` validated against the
+    controlled Product Family / Product Model / Metric catalogs, or ``None`` when
+    the LLM is unavailable or nothing usable comes back (caller falls back to the
+    keyword engine). Every item carries a verbatim ``evidence_quote`` the caller
+    relocates in the source documents for traceability.
+    """
+    if not client.available:
         return None
-    return {"products": out_products, "requirements": out_reqs}
+
+    families = _families_context(dp)
+    products = _products_context(dp)
+    metrics = [
+        {"metric_id": m.metric_id, "name": m.standard_name, "unit": m.unit}
+        for m in dp.metrics.values()
+    ]
+    chunks = _grounded_chunks(docs, chunk_chars=chunk_chars)
+    if not chunks:
+        return None
+
+    system = (
+        "You are a senior Qualitrol application engineer doing quotation take-off. "
+        "You are given a PORTION of the customer's project documents plus "
+        "Qualitrol's CONTROLLED catalog of Product Families and Product Models "
+        "(and a metric dictionary). "
+        "Your job is to read the documents and pin down, precisely:\n"
+        "  (1) which Qualitrol product families/models are GENUINELY required by "
+        "THIS project, and\n"
+        "  (2) the specific, valuable technical REQUIREMENTS stated in the documents "
+        "that justify those products or map to a controlled metric.\n\n"
+        "Hard rules:\n"
+        "- Ground every item in the documents. Provide a short VERBATIM quote "
+        "(copied exactly from the text, <=200 chars) as evidence for each item. "
+        "Never invent products, metrics, or values.\n"
+        "- Quote the ACTUAL requirement sentence from the body text. IGNORE the "
+        "table of contents, indexes, cover/signature pages, and running "
+        "headers/footers. NEVER use a line that is only a section title followed "
+        "by a page number (e.g. '3.3.1.16 HVAC system 39') as evidence.\n"
+        "- Use ONLY family_id / product_id / metric_id values from the provided "
+        "catalog. If a requirement fits a family but no specific model, give the "
+        "family_id and leave product_id empty.\n"
+        "- Be precise, not exhaustive: include an item only if the text genuinely "
+        "supports Qualitrol supplying/monitoring it in THIS project. IGNORE generic "
+        "background, and IGNORE anything the text marks as out-of-scope, future, "
+        "provision, optional, or supplied by another party.\n"
+        "- If this portion contains nothing relevant, return empty lists.\n"
+        "- A component of the plant being monitored (e.g. a breaker/CT/VT that is "
+        "part of the GIS) is NOT itself a monitoring product unless the customer "
+        "asks to MONITOR it.\n"
+        "Respond with STRICT JSON only."
+    )
+    system = _with_extra_rules(system, extra_instructions)
+
+    catalog_block = (
+        "Controlled Product Family catalog:\n"
+        + json.dumps(families, ensure_ascii=False)
+        + "\n\nControlled Product Model catalog:\n"
+        + json.dumps(products, ensure_ascii=False)
+        + "\n\nControlled Metric dictionary (map requirement values to these):\n"
+        + json.dumps(metrics, ensure_ascii=False)
+    )
+    return_form = (
+        "\n\nReturn JSON exactly of this form:\n"
+        '{"products":[{"product_id":"","family_id":"","in_scope":true,'
+        '"confidence":0.0,"evidence_quote":"","rationale":"one sentence"}],'
+        '"requirements":[{"family_id":"","product_id":"","metric_id":"","value":"",'
+        '"unit":"","requirement_type":"Must-have|Preferred|Reference|Quantity Basis",'
+        '"evidence_quote":"","confidence":0.0,"rationale":"one sentence"}]}'
+    )
+
+    all_products: list[dict] = []
+    all_reqs: list[dict] = []
+    for i, chunk in enumerate(chunks, start=1):
+        user = (
+            catalog_block
+            + f"\n\nCustomer project documents (part {i} of {len(chunks)}):\n"
+            + chunk
+            + return_form
+        )
+        try:
+            data = client.complete_json(system, user, max_tokens=8192)
+        except Exception:  # noqa: BLE001 - fail safe: skip this chunk, keep others
+            continue
+        if not isinstance(data, dict):
+            continue
+        prods, reqs = _parse_grounded_response(data, dp)
+        all_products.extend(prods)
+        all_reqs.extend(reqs)
+
+    merged_products, merged_reqs = _merge_grounded(all_products, all_reqs)
+    if not merged_products and not merged_reqs:
+        return None
+    return {"products": merged_products, "requirements": merged_reqs}
 
 
 # --------------------------------------------------------------------------- #
