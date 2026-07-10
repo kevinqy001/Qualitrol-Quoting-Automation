@@ -17,6 +17,14 @@ python-multipart>=0.0.18
 # rules-only without it; install to enable AI scenario refinement & explanations.
 anthropic>=0.86
 
+# Optional second model (GPT via Azure AI Foundry's OpenAI-compatible endpoint),
+# routed only to high-volume datasheet extraction (Step 0b) and SLD vision via
+# llm.get_client(role="bulk"|"vision"). azure-identity is needed for Azure AD
+# auth (DefaultAzureCredential) when no API key is set. Both optional: those
+# roles fall back to Claude when no GPT endpoint is configured.
+openai>=1.60
+azure-identity>=1.19
+
 # Optional VLM / SLD image rendering layer. Install to enable Claude Vision-based
 # SLD asset extraction (drawing_assets._extract_from_sld_vlm). The pipeline falls
 # back to text-layer extraction when PyMuPDF is not installed.

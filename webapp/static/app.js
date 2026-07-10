@@ -1096,6 +1096,15 @@
   if ($("#btn-spec-goboq")) {
     $("#btn-spec-goboq").addEventListener("click", () => switchTab("boq"));
   }
+  // Optional side-trip: open the standalone Drawing Agent (mounted at
+  // /drawing-agent) in a new tab so the user can review the SLD take-off, or
+  // skip it and go straight to the Draft BOQ. Opening in a new tab keeps the
+  // quoting session intact.
+  if ($("#btn-spec-drawing-agent")) {
+    $("#btn-spec-drawing-agent").addEventListener("click", () => {
+      window.open("/drawing-agent/", "_blank", "noopener");
+    });
+  }
   if ($("#btn-spec-analyze")) {
     $("#btn-spec-analyze").addEventListener("click", specStartAnalysis);
   }

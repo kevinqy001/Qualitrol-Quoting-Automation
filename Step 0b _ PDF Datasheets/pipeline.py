@@ -13,7 +13,8 @@ file-name + page-number evidence trail.
 
 Flow per PDF:
     pypdf text extraction (page-tagged)
-      -> LLM structuring     (Claude Opus 4.8 -> models + parameters JSON)
+      -> LLM structuring     (GPT "bulk" role -> models + parameters JSON;
+                              falls back to Claude when GPT is not configured)
       -> map to Metric IDs   (controlled sheet 04; unmapped -> Unmapped list)
       -> aggregate candidate catalog
 
@@ -332,7 +333,9 @@ def run(paths: list[Path], output_dir: str | Path | None = None,
 
     output_dir = Path(output_dir) if output_dir else config.OUTPUT_DIR / "_pdf_catalog"
     dp = load_data_package()
-    llm_client = llm.get_client()
+    # High-volume, well-bounded structured extraction -> GPT ("bulk" role);
+    # falls back to Claude when no GPT endpoint is configured.
+    llm_client = llm.get_client(role="bulk")
 
     results: list[PdfResult] = []
     for i, path in enumerate(paths, start=1):
@@ -362,7 +365,7 @@ def run(paths: list[Path], output_dir: str | Path | None = None,
         "step": "0b_pdf_datasheets",
         "llm": {
             "available": llm_client.available,
-            "model": config.SETTINGS.llm_deployment if llm_client.available else None,
+            "model": getattr(llm_client, "deployment", None) if llm_client.available else None,
         },
         "summary": {
             "pdfs_processed": len(results),

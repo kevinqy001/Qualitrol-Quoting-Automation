@@ -435,16 +435,21 @@ def _render_pdf_page_to_b64(
 def _extract_from_sld_vlm(
     doc: ParsedDocument, project_id: str, client
 ) -> list[DrawingAsset]:
-    """Optional VLM extraction path: render SLD as image → Claude Vision.
+    """Optional VLM extraction path: render SLD as image → GPT/Claude Vision.
 
     Uses ``_render_pdf_page_to_b64`` (requires PyMuPDF) to produce a PNG then
-    calls ``llm_extract.extract_sld_assets_vlm``. Falls back to an empty list
-    when the LLM client is unavailable, fitz is not installed, or rendering
-    fails.
+    calls ``llm_extract.extract_sld_assets_vlm``. Vision runs on the dedicated
+    "vision" client (GPT when configured, else Claude); the injected ``client``
+    is only a fallback (e.g. tests). Falls back to an empty list when no vision
+    client is available, fitz is not installed, or rendering fails.
     """
     from . import llm_extract  # local import to avoid circular dependency
+    from . import llm as _llm
 
-    if not client.available:
+    vision_client = _llm.get_client(role="vision")
+    if not getattr(vision_client, "available", False):
+        vision_client = client
+    if not getattr(vision_client, "available", False):
         return []
     if not doc.file_path or not doc.file_path.lower().endswith(".pdf"):
         return []
@@ -457,7 +462,7 @@ def _extract_from_sld_vlm(
         return []
 
     result = llm_extract.extract_sld_assets_vlm(
-        client, image_b64, doc.file_name, project_id
+        vision_client, image_b64, doc.file_name, project_id
     )
     return result or []
 
@@ -475,9 +480,16 @@ def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
     Safe no-op when the client is unavailable or PyMuPDF is missing.
     """
     from .document_parser import DocSegment
+    from . import llm as _llm
 
+    # ``client`` (the judge client) gates whether the LLM layer is enabled at
+    # all; the actual OCR runs on the dedicated "vision" client (GPT when
+    # configured, else Claude).
     if client is None or not getattr(client, "available", False):
         return 0
+    vision_client = _llm.get_client(role="vision")
+    if not getattr(vision_client, "available", False):
+        vision_client = client
 
     # Only act when the corpus lacks a real prose specification / email — this
     # targets the drawings-only failure case without adding cost elsewhere.
@@ -505,7 +517,7 @@ def augment_docs_with_sld_text(docs: list[ParsedDocument], client) -> int:
         image_b64 = _render_pdf_page_to_b64(doc.file_path, dpi=300)
         if not image_b64:
             continue
-        text = llm_extract.extract_sld_text_vlm(client, image_b64, doc.file_name)
+        text = llm_extract.extract_sld_text_vlm(vision_client, image_b64, doc.file_name)
         if not text:
             continue
         doc.segments.append(

@@ -634,7 +634,7 @@ def extract_sld_assets_vlm(
     drawing_id: str,
     project_id: str,
 ) -> Optional[list[DrawingAsset]]:
-    """Analyse a base64-encoded SLD page image with Claude Vision.
+    """Analyse a base64-encoded SLD page image with a vision model.
 
     Returns a list of ``DrawingAsset`` objects or ``None`` when the LLM is
     unavailable or the response cannot be parsed. Fails safe: any error
@@ -723,7 +723,7 @@ def extract_sld_assets_vlm(
                 drawing_area=area,
                 status=status,
                 notes=(
-                    f"Identified by Claude Vision from SLD image. Evidence: {evidence}. "
+                    f"Identified by vision model from SLD image. Evidence: {evidence}. "
                     "Confirm scope and quantity with engineering before use in BOQ."
                 ),
             )

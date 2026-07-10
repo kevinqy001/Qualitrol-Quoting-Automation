@@ -108,6 +108,27 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+# --------------------------------------------------------------------------- #
+# Optional: mount the standalone Drawing Agent (colleague's service) so the
+# quoting flow can open it between Spec Review and Draft BOQ (a "Review SLD
+# Diagram" button links to /drawing-agent/). It ships with seed detections and
+# runs with zero credentials, so the demo works offline. Guarded in try/except
+# so a missing optional dependency can never break the main app (fail-safe).
+# --------------------------------------------------------------------------- #
+try:
+    _DRAWING_AGENT_DIR = REPO_ROOT / "drawing-agent"
+    if _DRAWING_AGENT_DIR.exists():
+        if str(_DRAWING_AGENT_DIR) not in sys.path:
+            sys.path.insert(0, str(_DRAWING_AGENT_DIR))
+        from agent_service.server import app as _drawing_agent_app  # type: ignore
+
+        app.mount("/drawing-agent", _drawing_agent_app)
+        logging.info("Drawing Agent mounted at /drawing-agent")
+    else:
+        logging.info("Drawing Agent directory not found; skipping mount")
+except Exception as exc:  # pragma: no cover - optional integration, fail safe
+    logging.warning("Drawing Agent not mounted (optional): %s", exc)
+
 SAMPLE_PROJECT_ID = "00796547"
 
 FILE_TYPE_LABELS = {

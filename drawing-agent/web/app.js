@@ -14,7 +14,12 @@ const state={drawings:[],drawingId:null,session:null,anns:[],selectedId:null,
 const $=id=>document.getElementById(id);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const SVGNS='http://www.w3.org/2000/svg';
-const api=(p,o)=>fetch(p,o).then(r=>r.json());
+// Base path so the app works both standalone ("/") and mounted under a prefix
+// (e.g. "/drawing-agent/") inside the main Qualitrol app. Absolute API/asset
+// paths are prefixed with this.
+const BASE=location.pathname.replace(/\/[^/]*$/,'');
+const U=p=>BASE+p;
+const api=(p,o)=>fetch(U(p),o).then(r=>r.json());
 
 // ------------------------------------------------------------------ init
 async function init(){
@@ -65,7 +70,7 @@ async function selectDrawing(id){
   $('sessionText').textContent='session '+s.id;
   $('editor').classList.add('hidden');
   const img=$('drawing');
-  await new Promise(res=>{img.onload=res;img.src=`/web/drawings/${s.image}`;});
+  await new Promise(res=>{img.onload=res;img.src=U(`/web/drawings/${s.image}`);});
   $('overlay').setAttribute('viewBox',`0 0 ${s.width} ${s.height}`);
   $('overlay').setAttribute('width',s.width);$('overlay').setAttribute('height',s.height);
   img.width=s.width;img.height=s.height;
@@ -195,7 +200,7 @@ async function saveEdit(){
 
 async function deleteSelected(){
   const id=state.selectedId;if(!id)return;
-  await fetch(`/api/sessions/${state.session.id}/annotations/${id}`,{method:'DELETE'});
+  await fetch(U(`/api/sessions/${state.session.id}/annotations/${id}`),{method:'DELETE'});
   state.selectedId=null;$('editor').classList.add('hidden');await refresh();
 }
 
@@ -231,7 +236,7 @@ async function sendChat(){
   input.value='';addBubble('user',text);
   const typing=addBubble('agent','…');
   try{
-    const resp=await fetch(`/api/sessions/${state.session.id}/agent`,{method:'POST',
+    const resp=await fetch(U(`/api/sessions/${state.session.id}/agent`),{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';let firstMsg=true;
     while(true){
@@ -270,7 +275,7 @@ async function renderQuote(){
     <table><tr><th>Line</th><th>Text-only AI</th><th>Drawing take-off</th></tr>
     ${q.contrast.map(c=>`<tr><td>${c.line}</td><td class="wrong">${c.text_only_ai}</td>
       <td class="right">${c.drawing}</td></tr>`).join('')}</table>`;
-  $('exportBtn').href=`/api/sessions/${state.session.id}/export.csv`;
+  $('exportBtn').href=U(`/api/sessions/${state.session.id}/export.csv`);
 }
 
 // ------------------------------------------------------------------ viewer
