@@ -52,8 +52,17 @@ def boq_template_path() -> Path:
 
 SAMPLE_SUBMISSIONS_DIR: Path = REPO_ROOT / "Gemba Samples" / "3"
 
-# Default location for pipeline run artifacts (JSON outputs).
-OUTPUT_DIR: Path = REPO_ROOT / "outputs"
+# Location for pipeline run artifacts (uploads, JSON outputs, generated docs).
+# Env-driven so the demo deployment can point it at a durable share that
+# survives redeploys. On Azure App Service set QUALITROL_DATA_DIR=/home/data
+# (``/home`` is a plan-wide persistent share). Defaults to the in-repo
+# ``outputs/`` folder for local development.
+def _resolve_output_dir() -> Path:
+    override = os.getenv("QUALITROL_DATA_DIR")
+    return Path(override) if override else REPO_ROOT / "outputs"
+
+
+OUTPUT_DIR: Path = _resolve_output_dir()
 
 # File extensions the document parser knows how to read.
 SUPPORTED_DOC_EXTENSIONS = {

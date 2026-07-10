@@ -261,6 +261,142 @@
     cancelAnalysisBtn.textContent = isRunning ? "Terminate Current Analysis" : "No Active Analysis";
   }
 
+  // ── Project URL handling (shareable/bookmarkable server-backed resume) ──
+  // The project id in the URL query is the resume/share handle; the server
+  // reconstructs the project from files under OUTPUT_DIR/<project_id>/, not
+  // from browser localStorage.
+  function setProjectUrl(projectId) {
+    if (IS_STATIC || !projectId) return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("project", projectId);
+      window.history.replaceState({ project: projectId }, "", url.toString());
+    } catch { /* history API unavailable — non-fatal */ }
+  }
+
+  function clearProjectUrl() {
+    if (IS_STATIC) return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("project");
+      window.history.replaceState({}, "", url.toString());
+    } catch { /* non-fatal */ }
+  }
+
+  function getProjectFromUrl() {
+    try {
+      return new URL(window.location.href).searchParams.get("project");
+    } catch {
+      return null;
+    }
+  }
+
+  // Poll a background analysis job until it finishes (or errors/aborts). Shared
+  // by a fresh analysis and by URL-based resume of an in-flight project.
+  async function pollForProjectResult(projectId) {
+    while (true) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (activeAnalysisController && activeAnalysisController.signal.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      const pollRes = await fetch(
+        `${API}/ingest/result/${encodeURIComponent(projectId)}`,
+        { signal: activeAnalysisController ? activeAnalysisController.signal : undefined }
+      );
+      if (!pollRes.ok) {
+        let msg = `HTTP ${pollRes.status}`;
+        try { const e = await pollRes.json(); if (e && e.detail) msg = e.detail; } catch (_) {}
+        throw new Error(msg);
+      }
+      const pollData = await pollRes.json();
+      if (pollData && pollData.status === "processing") continue;
+      return pollData;
+    }
+  }
+
+  // Render a completed ingest payload (the same shape whether it came from a
+  // fresh analysis poll or from server-backed resume) into the review screen.
+  function showIngestResult(data) {
+    const total = data.fileCount || totalSelectedCount();
+    $("#upload-filename").textContent = data.fileName;
+    const extraction = data.extraction || data.boq;
+    $("#upload-meta").textContent =
+      `${formatBytes(data.fileSizeBytes)} · ${total} file(s) · ingested ${new Date(data.ingestedAt).toLocaleTimeString()} · mode: ${extraction.extractionMode || "auto"}`;
+    $("#stat-items").textContent = (extraction.requirements || extraction.lineItems || []).length;
+    $("#stat-confidence").textContent = Math.round((data.confidence || 0) * 100) + "%";
+    $("#stat-time").textContent = ((data.processingTimeMs || 0) / 1000).toFixed(1) + "s";
+    $("#stat-case").textContent = (data.caseId || "").replace("CASE-", "");
+
+    renderExtraction(extraction);
+    $("#upload-result").classList.remove("hidden");
+
+    // Keep the local History snapshot as a convenience (it is no longer the
+    // resume path — the project URL is — but the panel still lists recent work).
+    saveCaseToHistory({
+      caseId: data.caseId,
+      fileName: data.fileName,
+      ingestedAt: data.ingestedAt || new Date().toISOString(),
+      confidence: data.confidence,
+      fileCount: total,
+      fileSizeBytes: data.fileSizeBytes,
+      processingTimeMs: data.processingTimeMs,
+      extraction,
+    });
+  }
+
+  // Reconstruct a project from /?project=<id> using the server (source of
+  // truth). Returns true if it handled the page load (so the caller skips the
+  // sample data / welcome chooser), false to fall back to the fresh workflow.
+  async function resumeProjectFromUrl(projectId) {
+    let res;
+    try {
+      res = await fetch(`${API}/projects/${encodeURIComponent(projectId)}`);
+    } catch {
+      return false; // network error — fall back to the normal workflow
+    }
+    if (res.status === 404) {
+      clearProjectUrl();
+      return false;
+    }
+    if (!res.ok) {
+      // Stale (504) or recorded error (500): tell the user and let them rerun.
+      let msg = `HTTP ${res.status}`;
+      try { const e = await res.json(); if (e && e.detail) msg = e.detail; } catch (_) {}
+      alert("Couldn't reopen this project from its link: " + msg);
+      clearProjectUrl();
+      return false;
+    }
+
+    let data = await res.json();
+    if (data && data.status === "processing") {
+      // The analysis is still running on the server — resume the progress UI.
+      switchTab("ingestion");
+      $("#upload-progress").classList.remove("hidden");
+      setAnalysisRunning(true);
+      activeAnalysisController = new AbortController();
+      try {
+        data = await pollForProjectResult(projectId);
+      } catch (err) {
+        if (err.name !== "AbortError") alert("Analysis failed: " + err.message);
+        return true;
+      } finally {
+        activeAnalysisController = null;
+        $("#upload-progress").classList.add("hidden");
+        setAnalysisRunning(false);
+      }
+    }
+
+    showIngestResult(data);
+    const badge = $("#boq-status");
+    if (badge) {
+      badge.textContent = `Project · ${data.caseId || projectId}`;
+      badge.className = "badge accent";
+    }
+    switchTab("boq");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return true;
+  }
+
   async function analyzeSelectedFiles() {
     if (IS_STATIC) {
       alert(
@@ -295,54 +431,19 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       let data = await res.json();
 
+      // The server-generated project id is the project handle: reflect it into
+      // the URL (/?project=<id>) so the analysis is shareable/bookmarkable and
+      // can be resumed from the server on a later visit.
+      const projectId = data.projectId || data.jobId || data.caseId;
+      setProjectUrl(projectId);
+
       // Analysis runs as a background job (to avoid the cloud gateway request
       // timeout on long LLM/SLD analyses). Poll for the result until it's ready.
-      if (data && data.status === "processing" && (data.jobId || data.caseId)) {
-        const jobId = data.jobId || data.caseId;
-        while (true) {
-          await new Promise((r) => setTimeout(r, 3000));
-          if (activeAnalysisController && activeAnalysisController.signal.aborted) {
-            throw new DOMException("Aborted", "AbortError");
-          }
-          const pollRes = await fetch(`${API}/ingest/result/${encodeURIComponent(jobId)}`, {
-            signal: activeAnalysisController.signal,
-          });
-          if (!pollRes.ok) {
-            let msg = `HTTP ${pollRes.status}`;
-            try { const e = await pollRes.json(); if (e && e.detail) msg = e.detail; } catch (_) {}
-            throw new Error(msg);
-          }
-          const pollData = await pollRes.json();
-          if (pollData && pollData.status === "processing") continue;
-          data = pollData;
-          break;
-        }
+      if (data && data.status === "processing" && projectId) {
+        data = await pollForProjectResult(projectId);
       }
 
-      const total = totalSelectedCount();
-      $("#upload-filename").textContent = data.fileName;
-      const extraction = data.extraction || data.boq;
-      $("#upload-meta").textContent =
-        `${formatBytes(data.fileSizeBytes)} · ${data.fileCount || total} file(s) · ingested ${new Date(data.ingestedAt).toLocaleTimeString()} · mode: ${extraction.extractionMode || "auto"}`;
-      $("#stat-items").textContent = (extraction.requirements || extraction.lineItems || []).length;
-      $("#stat-confidence").textContent = Math.round(data.confidence * 100) + "%";
-      $("#stat-time").textContent = (data.processingTimeMs / 1000).toFixed(1) + "s";
-      $("#stat-case").textContent = data.caseId.replace("CASE-", "");
-
-      renderExtraction(extraction);
-      $("#upload-result").classList.remove("hidden");
-
-      // Persist this case so it can be revisited from the History panel.
-      saveCaseToHistory({
-        caseId: data.caseId,
-        fileName: data.fileName,
-        ingestedAt: data.ingestedAt || new Date().toISOString(),
-        confidence: data.confidence,
-        fileCount: data.fileCount || total,
-        fileSizeBytes: data.fileSizeBytes,
-        processingTimeMs: data.processingTimeMs,
-        extraction,
-      });
+      showIngestResult(data);
     } catch (err) {
       if (err.name === "AbortError") {
         $("#selected-file-meta").textContent =
@@ -2774,14 +2875,21 @@
 
   // ── Initial data load ──────────────────────────────────────────────────
   loadPoc1Status();
-  loadSampleBoq();
   loadSyncStatus();
   updateHistoryCount();
   marginLoadCatalog();
   marginRefreshRecords();
 
-  // Greet the user on entry: start a new case or continue a saved one.
-  showWelcome();
+  // URL-based project resume is the source of truth: if /?project=<id> is
+  // present, reconstruct that project from the server BEFORE loading the sample
+  // data or showing the welcome chooser. Otherwise fall back to the normal
+  // fresh-analysis entry point.
+  (async function initProjectView() {
+    const projectId = !IS_STATIC && getProjectFromUrl();
+    if (projectId && (await resumeProjectFromUrl(projectId))) return;
+    loadSampleBoq();
+    showWelcome();
+  })();
 })();
 
 function toggleCollapsible(bodyId, chevronId, labelId) {

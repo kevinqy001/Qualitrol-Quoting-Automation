@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 import sys
 import time
 import traceback
@@ -139,6 +140,37 @@ FEATURE_KEYWORDS = {
 # --------------------------------------------------------------------------- #
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# A background analysis job that has been "processing" longer than this is
+# treated as dead (the worker running it likely restarted/redeployed). The poll
+# and resume endpoints then return a clear "stale" status instead of letting the
+# client poll forever. In-flight work is not resumed across workers by design.
+STALE_JOB_SECONDS = 30 * 60
+
+# Generated quotation docs live at a deterministic path derived from this id, so
+# any worker can serve a download by path alone (no shared in-memory index).
+DOC_ID_RE = re.compile(r"^DOC-[A-F0-9]{6,32}$")
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Best-effort parse of an ISO-8601 timestamp (accepts a trailing 'Z')."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _job_is_stale(job: dict) -> bool:
+    """True if a 'processing' job started longer ago than STALE_JOB_SECONDS."""
+    started = _parse_iso(job.get("startedAt", ""))
+    if started is None:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds() > STALE_JOB_SECONDS
 
 
 def _features_from_text(text: str) -> dict[str, bool]:
@@ -475,14 +507,16 @@ async def _process_job(upload_dir, project_id, output_dir, sld_set, saved, skipp
             step1, step2, upload_dir, saved, skipped, files_count,
             total_bytes, first_ext, project_id, output_dir, started,
         )
-        result_path.write_text(_json.dumps(payload), encoding="utf-8")
-        job_path.write_text(_json.dumps({"status": "done"}), encoding="utf-8")
+        # Publish the result first, then flip the job to "done": a poll served
+        # by any worker that sees "done" is then guaranteed a complete result.
+        io_utils.write_json_atomic(result_path, payload)
+        io_utils.write_json_atomic(job_path, {"status": "done"})
     except Exception as exc:  # noqa: BLE001  (surface a clean error to the UI)
         logging.error("Pipeline failed for project %s:\n%s", project_id,
                       traceback.format_exc())
-        job_path.write_text(
-            _json.dumps({"status": "error", "message": f"Pipeline failed: {exc}"}),
-            encoding="utf-8",
+        io_utils.write_json_atomic(
+            job_path,
+            {"status": "error", "message": f"Pipeline failed: {exc}"},
         )
 
 
@@ -543,7 +577,10 @@ async def ingest_documents(
             pass
 
     started = time.perf_counter()
-    project_id = f"WEB-{uuid.uuid4().hex[:8].upper()}"
+    # 16 hex chars (not 8): the project_id is the on-disk directory name and the
+    # URL access handle, so a wider id resists guessing/enumeration of other
+    # users' projects.
+    project_id = f"WEB-{uuid.uuid4().hex[:16].upper()}"
     output_dir = config.OUTPUT_DIR / project_id
     upload_dir = output_dir / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -569,10 +606,9 @@ async def ingest_documents(
     # the request stays well under the cloud gateway timeout. The client polls
     # GET /api/v1/ingest/result/{jobId} for the outcome.
     job_path, _ = _job_paths(output_dir)
-    job_path.write_text(
-        _json.dumps({"status": "processing", "startedAt": _now(),
-                     "fileCount": len(files)}),
-        encoding="utf-8",
+    io_utils.write_json_atomic(
+        job_path,
+        {"status": "processing", "startedAt": _now(), "fileCount": len(files)},
     )
     task = asyncio.create_task(_process_job(
         upload_dir, project_id, output_dir, sld_set, saved, skipped,
@@ -582,7 +618,10 @@ async def ingest_documents(
     _INGEST_JOBS.add(task)
     task.add_done_callback(_INGEST_JOBS.discard)
 
-    return {"jobId": project_id, "caseId": project_id, "status": "processing"}
+    # projectId is the canonical key; jobId/caseId are compatibility aliases for
+    # the same value so existing polling code keeps working.
+    return {"projectId": project_id, "jobId": project_id, "caseId": project_id,
+            "status": "processing"}
 
 
 @app.get("/api/v1/ingest/result/{job_id}")
@@ -606,7 +645,59 @@ async def ingest_result(job_id: str):
         return _json.loads(result_path.read_text(encoding="utf-8"))
     if status == "error":
         raise HTTPException(500, job.get("message", "Pipeline failed."))
+    # A job stuck in "processing" past the threshold means the worker running it
+    # almost certainly restarted/redeployed; in-flight work is not resumed, so
+    # tell the client to rerun instead of polling forever.
+    if status == "processing" and _job_is_stale(job):
+        raise HTTPException(
+            504,
+            "This analysis was interrupted (the server likely restarted) and "
+            "cannot be resumed. Please rerun the analysis.",
+        )
     return {"status": "processing"}
+
+
+@app.get("/api/v1/projects/{project_id}")
+async def get_project(project_id: str):
+    """Reconstruct a project's current state from disk (URL-based resume).
+
+    This is what backs the shareable/bookmarkable ``/?project=<project_id>`` URL:
+    any worker can rebuild the project from deterministic files under
+    ``OUTPUT_DIR/<project_id>/`` with no dependency on browser storage or
+    process memory. ``_job.json`` is the authoritative state marker (written
+    before ingest returns) and ``_result.json`` is a complete snapshot of the
+    frontend payload, so resume is a switch on the job status:
+
+    - missing        -> 404 (unknown project)
+    - ``done``       -> the completed ingest payload (``_result.json``)
+    - ``processing`` (fresh) -> a processing response; the client resumes polling
+    - ``processing`` (stale) -> 504, user reruns
+    - ``error``      -> the recorded error
+    """
+    safe = _safe_case_id(project_id)
+    output_dir = config.OUTPUT_DIR / safe
+    job_path, result_path = _job_paths(output_dir)
+    if not job_path.exists():
+        raise HTTPException(404, "Unknown project id.")
+    try:
+        job = _json.loads(job_path.read_text(encoding="utf-8"))
+    except Exception:
+        # A half-written/unreadable marker is treated as still processing.
+        return {"status": "processing", "projectId": safe, "caseId": safe,
+                "jobId": safe}
+    status = job.get("status")
+    if status == "done" and result_path.exists():
+        return _json.loads(result_path.read_text(encoding="utf-8"))
+    if status == "error":
+        raise HTTPException(500, job.get("message", "Pipeline failed."))
+    if status == "processing" and _job_is_stale(job):
+        raise HTTPException(
+            504,
+            "This analysis was interrupted (the server likely restarted) and "
+            "cannot be resumed. Please rerun the analysis.",
+        )
+    return {"status": "processing", "projectId": safe, "caseId": safe,
+            "jobId": safe}
 
 
 # --------------------------------------------------------------------------- #
@@ -1110,10 +1201,16 @@ async def sync_status():
 
 
 # --------------------------------------------------------------------------- #
-# In-memory store for generated documents (maps doc_id -> file path)
-# In production this would use persistent storage.
+# Generated quotation documents live at a deterministic path on disk derived
+# from the doc_id, so any worker can serve the download by path alone. There is
+# no in-memory index (which would be invisible to other workers and lost on
+# restart).
 # --------------------------------------------------------------------------- #
-_generated_docs: dict[str, Path] = {}
+DOCGEN_DIR = config.OUTPUT_DIR / "_docgen"
+
+
+def _docgen_path(doc_id: str) -> Path:
+    return DOCGEN_DIR / f"Qualitrol_Quotation_{doc_id}.docx"
 
 
 @app.post("/api/v1/docgen/generate")
@@ -1152,12 +1249,10 @@ async def generate_doc():
     }
 
     doc_id = f"DOC-{uuid.uuid4().hex[:6].upper()}"
-    out_dir = config.OUTPUT_DIR / "_docgen"
-    out_path = out_dir / f"Qualitrol_Quotation_{doc_id}.docx"
+    out_path = _docgen_path(doc_id)
 
     try:
         generated = await asyncio.to_thread(generate_quotation_docx, priced_boq, out_path)
-        _generated_docs[doc_id] = generated
         file_size = generated.stat().st_size
     except Exception as exc:
         raise HTTPException(500, f"Document generation failed: {exc}") from exc
@@ -1678,9 +1773,16 @@ async def regenerate_boq(case_id: str):
 
 @app.get("/api/v1/docgen/download/{doc_id}")
 async def download_doc(doc_id: str):
-    """Download a previously generated quotation document."""
-    path = _generated_docs.get(doc_id)
-    if not path or not path.exists():
+    """Download a previously generated quotation document.
+
+    The path is derived from a strictly-validated ``doc_id`` (not an in-memory
+    index), so any worker can serve the file after a restart. Generated docs are
+    write-once and read-only after publish.
+    """
+    if not DOC_ID_RE.match(doc_id):
+        raise HTTPException(400, "Invalid document id.")
+    path = _docgen_path(doc_id)
+    if not path.exists():
         raise HTTPException(404, f"Document '{doc_id}' not found or has expired.")
     return FileResponse(
         path=str(path),
