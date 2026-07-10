@@ -86,7 +86,6 @@ class Thresholds:
 
 # Local credential files (gitignored). Created via setup; env vars override them.
 LLM_CONFIG_FILE: Path = Path(__file__).resolve().parent / "llm_config.local.json"
-OPENAI_CONFIG_FILE: Path = Path(__file__).resolve().parent / "openai_config.local.json"
 TAVILY_CONFIG_FILE: Path = Path(__file__).resolve().parent / "tavily_config.local.json"
 
 
@@ -128,50 +127,6 @@ def _resolve_llm() -> dict:
     return {"endpoint": endpoint, "api_key": api_key, "deployment": deployment}
 
 
-def _resolve_openai() -> dict:
-    """Resolve the OpenAI-compatible GPT client (Azure AI Foundry ``/openai/v1``).
-
-    This is a SECOND, optional model used only for high-volume extraction
-    (Step 0b datasheets) and SLD vision; the judgment layer stays on Claude.
-    Environment variables override the local file. Authentication is either an
-    API key (``OPENAI_FOUNDRY_API_KEY``) or, when no key is given, Azure AD via
-    ``DefaultAzureCredential`` against ``token_scope``.
-
-      - OPENAI_FOUNDRY_ENDPOINT     e.g. https://<res>.services.ai.azure.com/openai/v1
-      - OPENAI_FOUNDRY_DEPLOYMENT   e.g. gpt-5.6-sol
-      - OPENAI_FOUNDRY_API_KEY      optional; omit to use DefaultAzureCredential
-      - OPENAI_FOUNDRY_TOKEN_SCOPE  optional AAD scope (defaults to ai.azure.com)
-    """
-    local = _load_local_json(OPENAI_CONFIG_FILE)
-    endpoint = (
-        os.getenv("OPENAI_FOUNDRY_ENDPOINT")
-        or os.getenv("AI_FOUNDRY_OPENAI_ENDPOINT")
-        or local.get("endpoint", "")
-    )
-    api_key = (
-        os.getenv("OPENAI_FOUNDRY_API_KEY")
-        or os.getenv("AI_FOUNDRY_OPENAI_API_KEY")
-        or local.get("api_key", "")
-    )
-    deployment = (
-        os.getenv("OPENAI_FOUNDRY_DEPLOYMENT")
-        or os.getenv("AI_FOUNDRY_OPENAI_DEPLOYMENT")
-        or local.get("deployment")
-        or "gpt-5.6-sol"
-    )
-    token_scope = (
-        os.getenv("OPENAI_FOUNDRY_TOKEN_SCOPE")
-        or local.get("token_scope")
-        or "https://ai.azure.com/.default"
-    )
-    return {
-        "endpoint": endpoint,
-        "api_key": api_key,
-        "deployment": deployment,
-        "token_scope": token_scope,
-    }
-
-
 def _resolve_tavily() -> dict:
     """Resolve Tavily credentials: environment variables override the local file."""
     local = _load_local_json(TAVILY_CONFIG_FILE)
@@ -200,18 +155,23 @@ class Settings:
     llm_temperature: float | None = None
     llm_timeout: float = 60.0
 
-    # --- Optional GPT client (OpenAI-compatible Foundry endpoint) ---------- #
-    # Used ONLY for high-volume datasheet extraction (Step 0b) and SLD vision
-    # via get_client(role="bulk"|"vision"). Judgment tasks stay on Claude. When
-    # unset, those roles fall back to the Claude client (offline-first).
-    gpt_endpoint: str = field(default_factory=lambda: _resolve_openai()["endpoint"])
-    gpt_api_key: str = field(default_factory=lambda: _resolve_openai()["api_key"])
-    gpt_deployment: str = field(default_factory=lambda: _resolve_openai()["deployment"])
-    gpt_token_scope: str = field(default_factory=lambda: _resolve_openai()["token_scope"])
-    # Reasoning models spend part of the budget on hidden reasoning tokens, so
-    # keep this generous to avoid truncated (empty) JSON responses.
-    gpt_max_tokens: int = 8192
-    gpt_timeout: float = 90.0
+    # --- Per-role Claude deployments (same Anthropic Foundry endpoint/key) --- #
+    # ``judge`` uses ``llm_deployment`` (Opus) for precision. The high-throughput
+    # roles default to the faster Sonnet-5: ``analyze`` (grounded Step 1 locator
+    # over large document chunks), ``vision`` (page-image OCR + SLD analysis) and
+    # ``bulk`` (Step 0b datasheet extraction). Override any of them per env.
+    analyze_deployment: str = field(
+        default_factory=lambda: os.getenv("QUALITROL_ANALYZE_DEPLOYMENT")
+        or "claude-sonnet-5"
+    )
+    vision_deployment: str = field(
+        default_factory=lambda: os.getenv("QUALITROL_VISION_DEPLOYMENT")
+        or "claude-sonnet-5"
+    )
+    bulk_deployment: str = field(
+        default_factory=lambda: os.getenv("QUALITROL_BULK_DEPLOYMENT")
+        or "claude-sonnet-5"
+    )
 
     # --- Tavily web research (Step 0 product-catalog enrichment) --------- #
     tavily_api_key: str = field(default_factory=lambda: _resolve_tavily()["api_key"])
@@ -226,12 +186,6 @@ class Settings:
     @property
     def llm_credentials_present(self) -> bool:
         return bool(self.llm_endpoint and self.llm_api_key)
-
-    @property
-    def gpt_credentials_present(self) -> bool:
-        # An endpoint is enough: auth is either the API key or Azure AD
-        # (DefaultAzureCredential resolves from the environment / managed identity).
-        return bool(self.gpt_endpoint)
 
     @property
     def use_llm(self) -> bool:

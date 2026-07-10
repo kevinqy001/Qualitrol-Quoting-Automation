@@ -47,9 +47,10 @@ from qualitrol_core.data_package import DataPackage, load_data_package  # noqa: 
 from qualitrol_core.document_parser import (  # noqa: E402
     ParsedDocument,
     parse_project_folder,
+    strip_running_boilerplate,
 )
 from qualitrol_core.drawing_assets import (  # noqa: E402
-    augment_docs_with_sld_text,
+    augment_docs_with_image_text,
     extract_drawing_assets,
 )
 from qualitrol_core.schemas import (  # noqa: E402
@@ -109,6 +110,10 @@ def extract_evidence(
     for doc in docs:
         for seg in doc.segments:
             text = seg.text
+            # Table-of-contents / index pages list WHERE requirements live, not
+            # the requirements themselves; never mine them for evidence.
+            if llm_extract.looks_like_table_of_contents(text):
+                continue
             text_lower = text.lower()
 
             # (a) High-value controlled synonyms -> scenario.
@@ -712,6 +717,10 @@ def _locate_quote(quote: str, docs: list[ParsedDocument]):
             continue
         for doc in docs:
             for seg in doc.segments:
+                # Never anchor evidence to a table-of-contents / index page: those
+                # list where requirements live, not the requirements themselves.
+                if llm_extract.looks_like_table_of_contents(seg.text):
+                    continue
                 m = pattern.search(seg.text)
                 if m:
                     idx = m.start()
@@ -746,6 +755,14 @@ def _grounded_extract(
     ev_counter = 0
     scen_conf: dict[str, float] = {}
     scen_ev: dict[str, list[str]] = {}
+    # A product-identification call and a requirement-extraction call often
+    # cite the SAME sentence for the SAME scenario (e.g. "Class A PQ meters
+    # required per feeder" justifies both the product and its parameter value).
+    # Collapse those into one evidence row, keyed on the located (not raw quote)
+    # position, so the Spec Review modal doesn't show the identical page/line/
+    # snippet twice. A different scenario anchored to the same sentence is kept
+    # as its own row — that sentence genuinely supports two distinct scenarios.
+    located_evidence: dict[tuple[str, str, str, int], Evidence] = {}
 
     def _scenarios_for(fid: str, pid: str) -> list[str]:
         if pid and pid in dp.products and dp.products[pid].applicable_scenarios:
@@ -756,21 +773,35 @@ def _grounded_extract(
 
     def _add_evidence(quote, sid, conf, note):
         nonlocal ev_counter
-        ev_counter += 1
-        eid = f"EVD-{ev_counter:04d}"
         loc = _locate_quote(quote, docs)
-        scen = dp.scenarios.get(sid)
         if loc:
             src, location, line, snippet = loc
         else:
             src, location, line, snippet = "", "LLM (unlocated)", 0, (quote or "")
-        evidence.append(Evidence(
+        # Only dedupe when the quote was actually located: unlocated quotes all
+        # share the placeholder ("", "LLM (unlocated)", 0) and must never merge
+        # with each other just because none of them could be pinpointed.
+        dup_key = (sid, src, location, line) if (sid and loc) else None
+        if dup_key and dup_key in located_evidence:
+            existing = located_evidence[dup_key]
+            existing.confidence = round(max(existing.confidence, conf), 3)
+            if note and note not in existing.notes:
+                existing.notes = f"{existing.notes} | {note}".strip(" |")
+            scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
+            return existing.evidence_id
+        ev_counter += 1
+        eid = f"EVD-{ev_counter:04d}"
+        scen = dp.scenarios.get(sid)
+        new_evidence = Evidence(
             evidence_id=eid, project_id=project_id, source_document=src,
             location=location, line=line, evidence_text=snippet or (quote or ""),
             scenario_id=sid, scenario=scen.application_scenario if scen else "",
             asset_type=scen.asset_type if scen else "", asset_tag="",
             confidence=round(conf, 3), notes=note,
-        ))
+        )
+        evidence.append(new_evidence)
+        if dup_key:
+            located_evidence[dup_key] = new_evidence
         if sid:
             scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
             scen_ev.setdefault(sid, []).append(eid)
@@ -870,6 +901,11 @@ def run(
     dp = load_data_package()
     docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
 
+    # Drop running headers/footers (letterhead, tender/document number, footer
+    # column titles) that repeat on most pages. They are not requirements and
+    # otherwise pollute keyword evidence snippets and grounded chunks alike.
+    stripped_boilerplate = strip_running_boilerplate(docs)
+
     # Judge client (Claude) for the keyword-mode augmentation + context directives;
     # analyze client (project GPT) for the grounded requirement/product locator.
     client = llm.get_client()
@@ -886,13 +922,13 @@ def run(
     else:
         requested_mode = "grounded" if analyze_client.available else "keyword"
 
-    # --- P1-A: when a project supplies only drawings (no prose spec), use the
-    #     VLM to read the drawing's labels/titles and inject them as text so both
-    #     the grounded locator and keyword detection have text to work with. ---
+    # --- P1-A: recover image-only requirement pages in mixed PDFs, and when a
+    #     project supplies only drawings, read their monitoring labels. Injected
+    #     VLM text feeds both grounded and keyword extraction. ---
     aug_client = client if client.available else analyze_client
-    sld_text_augmented = 0
+    image_text_augmented = 0
     if aug_client.available:
-        sld_text_augmented = augment_docs_with_sld_text(docs, aug_client)
+        image_text_augmented = augment_docs_with_image_text(docs, aug_client)
 
     # --- Interpret the user's free-text context into structured directives that
     #     BOTH steps can act on (exclude / include / quantity_hint / note). ---
@@ -968,7 +1004,11 @@ def run(
             "extra_rules_applied": bool(extra_rules),
             "user_context_applied": bool((context_notes or "").strip()),
             "scenarios_dropped_by_llm": llm_dropped,
-            "sld_text_augmented_docs": sld_text_augmented,
+            # Keep the legacy key for consumers while reporting the broader,
+            # page-level behavior under an accurate name.
+            "sld_text_augmented_docs": image_text_augmented,
+            "image_text_augmented_pages": image_text_augmented,
+            "running_boilerplate_lines_removed": stripped_boilerplate,
         },
         "user_context": (context_notes or "").strip(),
         "context_directives": context_directives,

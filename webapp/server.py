@@ -600,8 +600,9 @@ async def ingest_documents(
     started = time.perf_counter()
     # 16 hex chars (not 8): the project_id is the on-disk directory name and the
     # URL access handle, so a wider id resists guessing/enumeration of other
-    # users' projects.
-    project_id = f"WEB-{uuid.uuid4().hex[:16].upper()}"
+    # users' projects. No "WEB-" prefix: it added no information and just
+    # cluttered the case id shown in the UI / BOQ filename.
+    project_id = uuid.uuid4().hex[:16].upper()
     output_dir = config.OUTPUT_DIR / project_id
     upload_dir = output_dir / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
