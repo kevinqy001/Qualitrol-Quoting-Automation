@@ -1447,12 +1447,16 @@
           <span>1</span>
           <span>File Ingestion</span>
         </button>
-        <button class="tab-btn" data-tab="boq" type="button">
+        <button class="tab-btn" data-tab="spec" type="button">
           <span>2</span>
+          <span>Spec Review</span>
+        </button>
+        <button class="tab-btn" data-tab="boq" type="button">
+          <span>3</span>
           <span>Requirement Review</span>
         </button>
         <button class="tab-btn" data-tab="margin" type="button">
-          <span>3</span>
+          <span>4</span>
           <span>Configure &amp; Quote</span>
         </button>
         <button class="tab-btn hidden" data-tab="pricing" type="button">
@@ -1557,6 +1561,59 @@
               <span>Review Spec Sections</span>
             </button>
           </div>
+        </div>
+      </section>
+
+      <section id="tab-spec" class="tab-panel">
+        <div class="section-header" style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
+          <div>
+            <p class="section-kicker">Step 2</p>
+            <h2 class="poc-title">Spec Review</h2>
+            <p class="poc-copy">Qualitrol-relevant requirement locations extracted from your specification document(s). Click a location on the right to jump to and highlight it in the source document on the left.</p>
+          </div>
+          <span class="badge" id="spec-source-badge">No document</span>
+        </div>
+
+        <div class="card spec-split" style="margin-top:16px;">
+          <!-- Left: source document preview (all pages) -->
+          <div class="spec-left">
+            <div class="spec-left-head">
+              <select id="spec-doc-select" class="field-input" style="max-width:100%;" aria-label="Select a specification document"></select>
+            </div>
+            <div id="spec-doc-view" class="spec-doc-view">
+              <div class="spec-doc-empty">Run an analysis first, then open Spec Review.</div>
+            </div>
+          </div>
+          <!-- Right: requirement location list -->
+          <div class="spec-right">
+            <div class="spec-right-head">
+              <h3 class="section-heading" style="margin:0;">Requirement Locations</h3>
+              <span class="badge" id="spec-loc-count">0</span>
+            </div>
+            <div id="spec-loc-list" class="spec-loc-list">
+              <div class="spec-doc-empty">No locations yet.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div class="card-body">
+            <p class="field-label" style="margin-bottom:8px;">Human Prompt (optional)</p>
+            <p class="section-copy" style="margin:0 0 8px; font-size:12px;">Extra guidance for the AI. It is combined with your document context and fed into both the extraction (Step 1) and BOQ (Step 2) reasoning when you Start New Analysis.</p>
+            <textarea id="spec-human-prompt" class="context-notes-input" style="min-height:96px;"
+              placeholder="e.g. Only 132kV FMS is in scope; one IDM+ recorder per monitored bay; ignore Future / Provision bays; exclude training and spares."></textarea>
+          </div>
+        </div>
+
+        <div class="button-row" style="justify-content: flex-end; padding: 16px 20px 0; gap:10px; flex-wrap:wrap;">
+          <span class="spec-foot-status" id="spec-foot-status" style="margin-right:auto; align-self:center; font-size:12px; color:var(--muted);"></span>
+          <button id="btn-spec-analyze" class="btn-secondary" type="button" title="Regenerate the BOQ from the edited requirement list + human prompt">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356M2.985 19.644v-4.992h4.992M19.5 8.25a7.5 7.5 0 00-13.02-2.34L2.985 9.348m18.03 5.304l-3.495 3.438A7.5 7.5 0 014.5 15.75"/>
+            </svg>
+            <span>Start New Analysis</span>
+          </button>
+          <button id="btn-spec-goboq" class="btn-primary" type="button">Review Draft BOQ</button>
         </div>
       </section>
 
@@ -2028,149 +2085,146 @@
     </div>
   </div>
 
-  <!-- ── Spec Sections modal: spec-only requirement list, editable ────────── -->
+  <!-- ── Spec Review tab styles (split source preview + location list) ────── -->
   <style>
-    .spec-panel { max-width: 1120px; display:flex; flex-direction:column; max-height: calc(100vh - 88px); }
-    .spec-body { overflow-y:auto; padding: 0 22px 16px; background: var(--paper-2, #fdfaf6); }
-    .spec-toolbar {
-      display:flex; align-items:center; justify-content:space-between; gap:12px;
-      flex-wrap:wrap; padding: 12px 2px 8px; margin-bottom: 2px;
-      position:sticky; top:0; z-index:3;
-      background: linear-gradient(var(--paper-2, #fdfaf6) 78%, transparent);
+    /* Two-column split: left = source-document page preview, right = location
+       list. Each column scrolls independently inside a fixed-height card. */
+    .spec-split {
+      display:flex; align-items:stretch; padding:0; overflow:hidden;
+      height: calc(100vh - 210px); min-height: 640px;
     }
-    #spec-count { font-weight:700; color: var(--ink); }
-    /* Card: a two-column grid (fields | source-region) above a full-width
-       footer row (location + delete). The grid uses align-items:stretch so the
-       Scenario label lines up with Source Region, and the preview image matches
-       the height of the left fields (down to the Reason box). */
-    .spec-item {
-      display:flex; flex-direction:column;
-      border:1px solid var(--line); border-radius:16px; padding:16px 18px; margin:14px 0;
-      background:var(--paper); box-shadow: 0 1px 2px rgb(31 20 12 / 0.04);
-      transition: box-shadow .16s, border-color .16s;
+    .spec-left {
+      flex: 1 1 58%; min-width:0; display:flex; flex-direction:column;
+      border-right:1px solid var(--line);
     }
-    /* Row 1 = the two column headers (Scenario | Source region), so their
-       labels line up. Row 2 = the field stack (left) and the preview image
-       (right); align-items:stretch makes the image span exactly from the
-       Scenario input top down to the Reason box bottom. */
-    .spec-grid {
-      display:grid; grid-template-columns: minmax(0,1fr) minmax(0,0.92fr);
-      grid-template-rows: auto minmax(0,1fr);
-      column-gap:18px; row-gap:8px; align-items:stretch;
+    .spec-left-head {
+      padding:12px 14px; border-bottom:1px solid var(--line);
+      background: var(--paper-2, #fdfaf6); flex:0 0 auto;
     }
-    .spec-head-l, .spec-head-r { display:flex; align-items:center; min-height:24px; }
-    .spec-head-l { justify-content:space-between; gap:12px; }
-    .spec-body-l { min-width:0; display:flex; flex-direction:column; }
-    /* Reason text fills any leftover height so its bottom aligns with the image. */
-    .spec-body-l .spec-reason-text { flex:1 1 auto; }
-    .spec-item:hover { box-shadow: var(--shadow); border-color:#ecdccb; }
-    .spec-item.spec-deleted { opacity:.55; background:#fbf7f4; }
-    .spec-item.spec-deleted .spec-input,
-    .spec-item.spec-deleted .spec-reason-text { text-decoration: line-through; color:var(--muted); }
-    @media (max-width: 820px){ .spec-grid { grid-template-columns: 1fr; grid-template-rows:none; } }
-
-    .spec-field-label {
-      font-size:10.5px; font-weight:800; letter-spacing:.06em; text-transform:uppercase;
-      color:var(--muted); margin:0;
+    .spec-doc-view {
+      flex:1 1 auto; overflow-y:auto; padding:16px; background:#f3ede7;
     }
-    .spec-body-l .spec-field-label { margin:12px 0 4px; }
-    /* Equal-width, aligned form controls (box-sizing so padding never offsets). */
-    .spec-input, .spec-textarea {
-      display:block; box-sizing:border-box; width:100%;
-      border:1px solid var(--line); border-radius:9px; padding:8px 11px;
-      font: inherit; font-size:13px; line-height:1.45; color:var(--ink);
-      background:#fff; resize:vertical; transition: border-color .14s, box-shadow .14s;
+    .spec-page {
+      position:relative; margin:0 auto 16px; max-width:100%;
+      box-shadow: var(--shadow-soft, 0 2px 8px rgb(31 20 12 / 0.12));
+      background:#fff; border:1px solid #e4d8cc;
     }
-    .spec-input { font-weight:650; }
-    .spec-input:hover, .spec-textarea:hover { border-color:#e2cdb6; }
-    .spec-input:focus, .spec-textarea:focus {
-      outline:none; border-color: var(--accent, #b45309);
-      box-shadow: 0 0 0 3px rgb(180 83 9 / 0.12);
-    }
-
-    /* Reason is read-only: shown as plain text, not an editable control. */
-    .spec-reason-text {
-      box-sizing:border-box; width:100%;
-      font-size:13px; line-height:1.5; color:var(--ink);
-      margin:0; white-space:pre-wrap; word-break:break-word;
-    }
-    .spec-reason-empty { color:var(--muted); }
-
-    .spec-footrow {
-      display:flex; align-items:center; justify-content:space-between; gap:10px;
-      margin-top:16px; padding-top:16px; border-top:1px dashed var(--line);
-    }
-    .spec-loc {
-      display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#8a5a2b;
-      background:var(--ralliant-orange-soft, #fdf1e7); border:1px solid #f0dcc6;
-      border-radius:999px; padding:4px 12px; min-width:0;
-    }
-    .spec-loc svg { flex:0 0 auto; opacity:.7; }
-    .spec-loc-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-
-    /* Sits in grid row 2, col 2 — stretched to the left field-stack's height.
-       The image is absolutely positioned so its intrinsic size never inflates
-       the row (the left column dictates the height). */
-    .spec-img-wrap {
-      position:relative; overflow:hidden; height:100%; min-height:120px;
-      border:1px solid var(--line); border-radius:12px; background:#faf7f3;
+    .spec-page:last-child { margin-bottom:0; }
+    .spec-page img { display:block; width:100%; height:auto; }
+    .spec-page-ph {
       display:flex; align-items:center; justify-content:center;
+      color:var(--muted); font-size:12px; background:#fbf8f4;
     }
-    .spec-img-wrap img {
-      position:absolute; inset:0; width:100%; height:100%;
-      object-fit:contain; object-position:center;
-      cursor:zoom-in; transition: opacity .2s;
+    .spec-page-label {
+      position:absolute; top:6px; left:6px; z-index:2;
+      background:rgb(31 20 12 / 0.55); color:#fff; font-size:10.5px; font-weight:700;
+      padding:2px 7px; border-radius:6px; letter-spacing:.03em;
     }
-    .spec-img-empty { color:var(--muted); font-size:12px; padding:24px 14px; text-align:center; }
-    @media (max-width: 820px){
-      .spec-img-wrap { height:200px; }
+    /* Dynamic line highlight: a soft pulsing band over the relevant line
+       (no hard box outline), positioned vertically by the region bbox. */
+    .spec-highlight {
+      position:absolute; z-index:1; pointer-events:none; border-radius:5px;
+      background: rgb(255 179 71 / 0.30);
+      animation: specLinePulse 1.15s ease-in-out infinite;
+    }
+    @keyframes specLinePulse {
+      0%, 100% { background: rgb(255 179 71 / 0.12); box-shadow: 0 0 0 0 rgb(237 84 29 / 0); }
+      50%      { background: rgb(255 179 71 / 0.44); box-shadow: 0 0 12px 2px rgb(237 84 29 / 0.38); }
     }
 
+    .spec-right {
+      flex: 1 1 42%; min-width:0; display:flex; flex-direction:column;
+    }
+    .spec-right-head {
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      padding:14px 18px; border-bottom:1px solid var(--line); flex:0 0 auto;
+    }
+    .spec-loc-list { flex:1 1 auto; overflow-y:auto; padding:12px 14px; }
+    .spec-loc-item {
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      width:100%; text-align:left; cursor:pointer;
+      border:1px solid var(--line); border-radius:12px;
+      background:#fff; padding:12px 14px; margin-bottom:10px;
+      transition: border-color .14s, box-shadow .14s, background .14s;
+    }
+    .spec-loc-item:hover { border-color:#e2cdb6; box-shadow: var(--shadow-soft); }
+    .spec-loc-item.active {
+      border-color: var(--ralliant-orange, #ed541d);
+      box-shadow: 0 0 0 3px rgb(237 84 29 / 0.12);
+      background: var(--ralliant-orange-soft, #fdf1e7);
+    }
+    .spec-loc-main { min-width:0; }
+    .spec-loc-title {
+      font-size:13.5px; font-weight:750; color:var(--ink);
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .spec-loc-sub { font-size:11.5px; color:var(--muted); margin-top:3px; }
+    .spec-loc-main { cursor:pointer; }
+    .conf-pill {
+      display:inline-flex; align-items:center; gap:5px; flex:0 0 auto;
+      color:#fff; font-size:11px; font-weight:750; padding:3px 9px; border-radius:999px;
+    }
+    .conf-dot { width:7px; height:7px; border-radius:50%; background:#fff; opacity:.85; }
+    /* Per-item side column: confidence pill + feedback/delete controls. */
+    .spec-loc-side { display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex:0 0 auto; }
+    .spec-loc-actions { display:inline-flex; gap:6px; align-items:center; }
+    .spec-fb-btn {
+      width:30px; height:30px; border-radius:50%; border:1px solid var(--line);
+      background:#fff; cursor:pointer; font-size:14px; line-height:1;
+      display:inline-flex; align-items:center; justify-content:center;
+      filter:grayscale(.4); transition: transform .14s, box-shadow .14s, filter .14s, background .14s, border-color .14s, opacity .14s;
+    }
+    .spec-fb-btn:hover { transform:translateY(-1px) scale(1.05); filter:grayscale(0); box-shadow:var(--shadow-soft); }
+    .spec-fb-btn.selected-up { background:var(--success-soft, #e6f6ef); border-color:var(--success, #13795b); filter:grayscale(0); }
+    .spec-fb-btn.selected-down { background:var(--ralliant-orange-soft, #fdf1e7); border-color:var(--ralliant-orange, #ed541d); filter:grayscale(0); }
+    .spec-fb-btn.dim { opacity:.42; }
     .spec-del-btn {
-      border:1px solid var(--line); background:#fff; border-radius:9px; cursor:pointer;
-      font-size:12px; font-weight:650; color:#b42318; padding:6px 12px;
-      display:inline-flex; align-items:center; gap:5px; flex:0 0 auto; transition: background .14s, border-color .14s;
+      width:30px; height:30px; border-radius:8px; border:1px solid var(--line);
+      background:#fff; color:#b42318; cursor:pointer; font-size:14px;
+      display:inline-flex; align-items:center; justify-content:center; transition: background .14s, border-color .14s;
     }
     .spec-del-btn:hover { background:#fff0ef; border-color:#f0c0bb; }
-    .spec-del-btn[data-action="restore"] { color:#1f7a4d; }
-    .spec-del-btn[data-action="restore"]:hover { background:#eefaf2; border-color:#bfe6ce; }
-
-    .spec-empty { text-align:center; color:var(--muted); padding:52px 16px; }
-    .spec-foot-status { font-size:12px; color:var(--muted); }
-    #spec-modal .history-foot { background: var(--paper); }
+    .spec-loc-restore {
+      color:#1f7a4d; border:1px solid var(--line); background:#fff; border-radius:8px;
+      padding:5px 10px; font-size:12px; font-weight:650; cursor:pointer; white-space:nowrap;
+    }
+    .spec-loc-restore:hover { background:#eefaf2; border-color:#bfe6ce; }
+    .spec-loc-item.spec-loc-deleted { opacity:.6; background:#fbf7f4; }
+    .spec-loc-item.spec-loc-deleted .spec-loc-title,
+    .spec-loc-item.spec-loc-deleted .spec-loc-sub { text-decoration:line-through; color:var(--muted); }
+    .spec-doc-empty { text-align:center; color:var(--muted); padding:40px 16px; font-size:13px; }
+    @media (max-width: 900px){
+      .spec-split { flex-direction:column; height:auto; }
+      .spec-left { border-right:none; border-bottom:1px solid var(--line); }
+      .spec-doc-view { max-height:60vh; }
+      .spec-loc-list { max-height:50vh; }
+    }
   </style>
-  <div id="spec-modal" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="spec-title">
-    <div class="history-panel spec-panel">
+
+  <!-- ── Spec item feedback modal: capture per-item negative comments ─────── -->
+  <div id="spec-fb-modal" class="history-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="spec-fb-title">
+    <div class="history-panel" style="max-width:540px;">
       <div class="history-head">
         <div style="flex:1;">
-          <p class="section-kicker" style="margin-bottom:4px;">Specification Review</p>
-          <h2 class="section-heading" id="spec-title">Review Spec Sections</h2>
-          <p class="section-copy" style="margin:0;">Qualitrol-relevant requirements extracted from your specification document(s). Edit or delete items, then start a new analysis to regenerate the BOQ.</p>
+          <p class="section-kicker" style="margin-bottom:4px;">Feedback</p>
+          <h2 class="section-heading" id="spec-fb-title">What's wrong with this requirement?</h2>
+          <p class="section-copy" id="spec-fb-target" style="margin:0;"></p>
         </div>
-        <button id="btn-spec-close" class="file-pill-remove" type="button" aria-label="Close" style="width:34px;height:34px;">×</button>
+        <button id="btn-spec-fb-close" class="file-pill-remove" type="button" aria-label="Close feedback" style="width:34px;height:34px;">×</button>
       </div>
-      <div class="spec-body">
-        <div class="spec-toolbar">
-          <span class="section-copy" id="spec-count" style="font-size:12px;">Loading…</span>
-          <span class="section-copy" id="spec-docs" style="font-size:12px;"></span>
-        </div>
-        <div id="spec-list"></div>
+      <div style="padding:14px 20px;">
+        <textarea id="spec-fb-comment" rows="5" class="field-input" style="width:100%; resize:vertical;" placeholder="Tell us what's wrong with this requirement location (wrong location, not relevant, missing context, etc.)…"></textarea>
       </div>
       <div class="history-foot">
-        <span class="spec-foot-status" id="spec-foot-status"></span>
-        <div style="display:flex; gap:8px; flex:0 0 auto; flex-wrap:wrap;">
-          <button id="btn-spec-analyze" class="btn-secondary" type="button" style="min-height:36px;" title="Regenerate the BOQ from the edited spec requirements plus the SLD-derived scope">
-            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356M2.985 19.644v-4.992h4.992M19.5 8.25a7.5 7.5 0 00-13.02-2.34L2.985 9.348m18.03 5.304l-3.495 3.438A7.5 7.5 0 014.5 15.75"/>
-            </svg>
-            <span>Start New Analysis</span>
-          </button>
-          <button id="btn-spec-goboq" class="btn-primary" type="button" style="min-height:36px;">Review Draft BOQ</button>
+        <span class="section-copy" style="font-size:12px;">Your rating and comment are linked to this requirement item and case ID.</span>
+        <div style="display:flex; gap:8px; flex:0 0 auto;">
+          <button id="btn-spec-fb-cancel" class="btn-secondary" type="button" style="min-height:36px;">Cancel</button>
+          <button id="btn-spec-fb-submit" class="btn-primary" type="button" style="min-height:36px;">Submit feedback</button>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=35"></script>
+  <script src="/static/app.js?v=37"></script>
 </body>
 </html>

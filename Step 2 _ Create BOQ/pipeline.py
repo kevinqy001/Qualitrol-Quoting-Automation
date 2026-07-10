@@ -1330,7 +1330,8 @@ def _build_project_summary(detected: list[dict], requirements: list[dict],
 
 
 def _apply_match_explanations(matches: list[ProductMatch], detected: list[dict],
-                              dp: DataPackage, client, project_summary: dict) -> bool:
+                              dp: DataPackage, client, project_summary: dict,
+                              extra_instructions: str = "") -> bool:
     compact = []
     for m in matches:
         sid = _scenario_for_family(m.family_id, detected, dp)
@@ -1340,7 +1341,9 @@ def _apply_match_explanations(matches: list[ProductMatch], detected: list[dict],
             "scenario_id": sid, "capability_known": capability_known,
             "match_score": m.match_score,
         })
-    explanations = llm_extract.explain_matches(client, project_summary, compact)
+    explanations = llm_extract.explain_matches(
+        client, project_summary, compact, extra_instructions
+    )
     if not explanations:
         return False
     for m in matches:
@@ -1374,6 +1377,15 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     directives = step1.get("context_directives", []) or []
     asset_counts = _asset_counts(drawing_assets)
 
+    # Human prompt / project context (from File Ingestion or Spec Review). Also
+    # injected into the Step 2 LLM augmentation so the reviewer's guidance shapes
+    # the BOQ recommendations & clarification questions (logic otherwise unchanged).
+    _user_context = (step1.get("user_context") or "").strip()
+    step2_extra = (
+        "The user provided the following project context / instructions — weigh "
+        "it heavily:\n" + _user_context
+    ) if _user_context else ""
+
     # User-provided quantity hints (e.g. "6 feeders", "273 gas zones") override
     # the drawing-derived counts before sizing.
     applied_hints = _apply_quantity_hints(asset_counts, directives, dp)
@@ -1392,7 +1404,7 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     project_summary = _build_project_summary(detected, requirements, asset_counts)
     if client.available and matches:
         llm_used = _apply_match_explanations(
-            matches, detected, dp, client, project_summary
+            matches, detected, dp, client, project_summary, step2_extra
         ) or llm_used
 
     # When the integrated CBM scenario is present, fold the transformer
@@ -1471,7 +1483,9 @@ def run(step1_path: str | Path, output_dir: str | Path | None = None) -> dict:
     # --- LLM augmentation: suggest any additional clarification questions ---
     if client.available and matches:
         existing_q = [q.question for q in missing]
-        extra = llm_extract.suggest_missing_info(client, project_summary, existing_q)
+        extra = llm_extract.suggest_missing_info(
+            client, project_summary, existing_q, step2_extra
+        )
         if extra:
             llm_used = True
             seen = {(q.scenario_id, q.missing_item.lower()) for q in missing}

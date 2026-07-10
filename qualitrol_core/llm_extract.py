@@ -392,7 +392,7 @@ def _scenario_metric_ids(scenario, dp) -> list[str]:
 # Step 2 - match explanation
 # --------------------------------------------------------------------------- #
 def explain_matches(client, project_summary: dict,
-                    matches: list[dict]) -> Optional[dict]:
+                    matches: list[dict], extra_instructions: str = "") -> Optional[dict]:
     """Return {family_id: {recommendation, gap_or_risk}} or None."""
     if not client.available or not matches:
         return None
@@ -410,6 +410,7 @@ def explain_matches(client, project_summary: dict,
         "to resolve before quoting. Note when product model/capability data is TBD and "
         "must be validated. Respond with STRICT JSON only."
     )
+    system = _with_extra_rules(system, extra_instructions)
     user = (
         "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
         + "\n\nCandidate families:\n" + json.dumps(compact, ensure_ascii=False)
@@ -435,7 +436,8 @@ def explain_matches(client, project_summary: dict,
 # Step 2 - extra clarification questions
 # --------------------------------------------------------------------------- #
 def suggest_missing_info(client, project_summary: dict,
-                         existing_items: list[str]) -> Optional[list[dict]]:
+                         existing_items: list[str],
+                         extra_instructions: str = "") -> Optional[list[dict]]:
     """Suggest additional clarification questions. Returns list of dicts or None."""
     if not client.available:
         return None
@@ -444,6 +446,7 @@ def suggest_missing_info(client, project_summary: dict,
         "questions that are genuinely needed to finalize the BOQ and are NOT already "
         "covered. Be specific and few (max 4). Respond with STRICT JSON only."
     )
+    system = _with_extra_rules(system, extra_instructions)
     user = (
         "Project summary:\n" + json.dumps(project_summary, ensure_ascii=False)
         + "\n\nQuestions already raised:\n" + json.dumps(existing_items, ensure_ascii=False)
