@@ -10,10 +10,13 @@ Supported: .pdf (pypdf), .docx (python-docx), .txt/.eml/.msg/.md (plain text),
 
 from __future__ import annotations
 
+import datetime
+import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import config
 
@@ -62,19 +65,60 @@ def infer_doc_type(file_name: str, text: str = "") -> str:
 # --------------------------------------------------------------------------- #
 # Per-format parsers
 # --------------------------------------------------------------------------- #
-def _parse_pdf(path: Path) -> list[DocSegment]:
+def _parse_pdf(
+    path: Path,
+    *,
+    page_prefilter: Optional[Callable[[str], bool]] = None,
+) -> list[DocSegment]:
+    """Parse a PDF into one segment per page (page number preserved in location).
+
+    ``page_prefilter`` is an optional, memory-saving screen for *very large*
+    PDFs (e.g. a 2000+ page reference standard): a callable returning ``True``
+    when a page's text should be kept. When supplied AND the document exceeds
+    ``QUALITROL_PARSE_PREFILTER_MIN_PAGES`` pages, only pages that pass the
+    screen (plus a small neighbour radius for context) are retained, so the
+    whole body never has to sit in memory or flow into every downstream stage.
+    It is a pure speed/RAM lever, gated so small/medium PDFs are unaffected, and
+    fail-safe: an empty selection keeps every page (never returns nothing).
+    """
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
-    segments: list[DocSegment] = []
+    pages: list[tuple[int, str]] = []
     for i, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text() or ""
         except Exception:  # pragma: no cover - corrupt page
             text = ""
         if text.strip():
-            segments.append(DocSegment(location=f"page {i}", text=text))
-    return segments
+            pages.append((i, text))
+
+    if page_prefilter is not None:
+        try:
+            min_pages = max(1, int(os.getenv("QUALITROL_PARSE_PREFILTER_MIN_PAGES", "150")))
+        except ValueError:
+            min_pages = 150
+        try:
+            radius = max(0, int(os.getenv("QUALITROL_PARSE_PREFILTER_RADIUS", "1")))
+        except ValueError:
+            radius = 1
+        if len(pages) >= min_pages:
+            keep: set[int] = set()
+            for idx, (_pno, text) in enumerate(pages):
+                try:
+                    hit = page_prefilter(text)
+                except Exception:  # pragma: no cover - defensive: keep on error
+                    hit = True
+                if hit:
+                    lo = max(0, idx - radius)
+                    hi = min(len(pages), idx + radius + 1)
+                    keep.update(range(lo, hi))
+            # Only prune when the screen actually reduced volume; an empty or
+            # all-pages result falls back to keeping everything (recall-safe).
+            if keep and len(keep) < len(pages):
+                pages = [pages[j] for j in sorted(keep)]
+
+    return [DocSegment(location=f"page {i}", text=text) for i, text in pages]
 
 
 def _parse_docx(path: Path) -> list[DocSegment]:
@@ -96,21 +140,166 @@ def _parse_docx(path: Path) -> list[DocSegment]:
     return segments
 
 
+# A plain number (optionally with thousands separators / %); used to tell a
+# column-title cell (text) from a data cell (value) during header detection.
+_XLSX_NUM_RE = re.compile(r"^[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$|^[-+]?\d+(?:\.\d+)?$")
+
+
+def _xlsx_cell(value) -> str:
+    """Render a cell to a clean string (ints without .0, dates as ISO)."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:g}"
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()[:10]
+    return str(value).strip()
+
+
+def _xlsx_is_number(text: str) -> bool:
+    return bool(text) and bool(_XLSX_NUM_RE.match(text.strip().rstrip("%")))
+
+
+def _xlsx_pick_header(rows: list[tuple[int, list[str]]]) -> Optional[int]:
+    """Choose the most likely column-header row among the first rows.
+
+    A header row has several non-empty, mostly non-numeric (label-like) cells.
+    Returns its position (index into ``rows``) or None when no row qualifies
+    (e.g. a key-value or title-only sheet).
+    """
+    best_pos, best_score = None, -1.0
+    for pos, (_idx, cells) in enumerate(rows[:12]):
+        non_empty = [c for c in cells if c]
+        if len(non_empty) < 2:
+            continue
+        text_cells = [c for c in non_empty if not _xlsx_is_number(c)]
+        if len(text_cells) < max(2, int(0.6 * len(non_empty))):
+            continue
+        score = len(text_cells) - 0.3 * pos  # prefer wider, earlier rows
+        if score > best_score:
+            best_pos, best_score = pos, score
+    return best_pos
+
+
+def _classify_sheet(title: str, blob: str, *, key_value: bool) -> str:
+    """Human-readable description of what a worksheet contains."""
+    t = f"{title} {blob}".lower()
+
+    def has(*keys: str) -> bool:
+        return any(k in t for k in keys)
+
+    if "boq" in title.lower() or has("bill of quant", "schedule of price",
+                                      "schedule of quant"):
+        return "Bill of Quantities / priced schedule"
+    if has("margin", "list price", "unit price", "costing", "cost (") and has(
+        "qty", "unit", "item", "price"
+    ):
+        return "Pricing / costing sheet"
+    if has("qtms", "cbm system", "transformer monitoring", "tap changer",
+           "oltc") and has("bushing", "winding", "dga", "oil temp", "cooling"):
+        return "Transformer condition-monitoring (QTMS / CBM) schedule"
+    if has("gas zone", "gas density", "gdht", "gdt-20", "sf6", "compartment"):
+        return "SF6 gas-zone / sensor schedule"
+    if has("coupler", "ocu", "uhf", "partial discharge", "pd sensor"):
+        return "Partial-discharge equipment schedule"
+    if has("sensor", "transducer", "rtd", "probe", "hall effect"):
+        return "Sensor / accessory schedule"
+    if has("part #", "part no", "item name", "model", "no. units", "qty", "quantity"):
+        return "Equipment / parts table"
+    if key_value:
+        return "Technical parameter list (key-value)"
+    return "Data table"
+
+
 def _parse_xlsx(path: Path) -> list[DocSegment]:
+    """Parse a workbook into human-readable segments.
+
+    Instead of dumping raw pipe-joined cells (unreadable), each sheet is
+    classified and its rows are rendered with their column headers as short
+    "Header: value" statements (or "Label: value" for two-column key-value
+    sheets). A leading per-sheet overview names the sheet type and columns so
+    both a human reviewer and the downstream extractor get real context.
+    """
     from openpyxl import load_workbook
+
+    max_rows = int(os.getenv("QUALITROL_XLSX_MAX_ROWS", "2000"))
+    max_cols = int(os.getenv("QUALITROL_XLSX_MAX_COLS", "40"))
+    max_render = int(os.getenv("QUALITROL_XLSX_MAX_RENDER", "1200"))
 
     workbook = load_workbook(str(path), data_only=True, read_only=True)
     segments: list[DocSegment] = []
     for sheet in workbook.worksheets:
+        rows: list[tuple[int, list[str]]] = []
         for r_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-            values = [str(v).strip() for v in row if v not in (None, "")]
-            if values:
-                segments.append(
-                    DocSegment(
-                        location=f"sheet '{sheet.title}' row {r_idx}",
-                        text=" | ".join(values),
-                    )
+            if r_idx > max_rows:
+                break
+            cells = [_xlsx_cell(v) for v in row[:max_cols]]
+            while cells and cells[-1] == "":
+                cells.pop()
+            if any(cells):
+                rows.append((r_idx, cells))
+        if not rows:
+            continue
+
+        title = sheet.title
+        widths = [sum(1 for c in cells if c) for _, cells in rows]
+        max_w = max(widths)
+        # Key-value layout: at most two columns and most rows are label+value.
+        two_col = sum(1 for w in widths if w == 2)
+        key_value = max_w <= 2 and two_col >= max(1, int(0.5 * len(rows)))
+        header_pos = None if key_value else _xlsx_pick_header(rows)
+        headers = rows[header_pos][1] if header_pos is not None else []
+
+        blob = " ".join(" ".join(c for c in cells if c) for _, cells in rows[:60])
+        classification = _classify_sheet(title, blob, key_value=key_value)
+
+        overview = f"Sheet '{title}' - {classification}; {len(rows)} non-empty row(s)."
+        header_names = [h for h in headers if h]
+        if header_names:
+            overview += " Columns: " + ", ".join(header_names) + "."
+        segments.append(
+            DocSegment(location=f"sheet '{title}' overview", text=overview)
+        )
+
+        rendered = 0
+        for pos, (r_idx, cells) in enumerate(rows):
+            non_empty = [c for c in cells if c]
+            if not non_empty:
+                continue
+            if rendered >= max_render:
+                segments.append(DocSegment(
+                    location=f"sheet '{title}' note",
+                    text=f"[... {len(rows) - pos} further rows omitted for brevity ...]",
+                ))
+                break
+
+            if key_value:
+                text = non_empty[0] if len(non_empty) == 1 else (
+                    f"{non_empty[0]}: {', '.join(non_empty[1:])}"
                 )
+            elif header_pos is not None:
+                if pos == header_pos:
+                    continue  # header already summarised in the overview
+                if pos < header_pos:
+                    text = "; ".join(non_empty)  # title / description lines
+                else:
+                    pairs = []
+                    for ci, val in enumerate(cells):
+                        if not val:
+                            continue
+                        head = headers[ci] if ci < len(headers) and headers[ci] else f"col{ci + 1}"
+                        pairs.append(f"{head}: {val}")
+                    text = "; ".join(pairs)
+            else:
+                text = "; ".join(non_empty)
+
+            if text.strip():
+                segments.append(
+                    DocSegment(location=f"sheet '{title}' row {r_idx}", text=text)
+                )
+                rendered += 1
     workbook.close()
     return segments
 
@@ -206,6 +395,8 @@ def _parse_text(path: Path) -> list[DocSegment]:
 def parse_document(
     path: str | Path,
     doc_type_override: Optional[str] = None,
+    *,
+    page_prefilter: Optional[Callable[[str], bool]] = None,
 ) -> Optional[ParsedDocument]:
     """Parse a single file into a ParsedDocument, or None if unsupported/empty.
 
@@ -214,6 +405,7 @@ def parse_document(
         doc_type_override: When provided, skips ``infer_doc_type`` and uses this
             value directly.  Useful when the caller already knows the role of the
             file (e.g. the user explicitly dropped it into the SLD upload zone).
+        page_prefilter: Optional large-PDF page screen (see ``_parse_pdf``).
     """
     path = Path(path)
     ext = path.suffix.lower()
@@ -222,7 +414,7 @@ def parse_document(
 
     try:
         if ext == ".pdf":
-            segments = _parse_pdf(path)
+            segments = _parse_pdf(path, page_prefilter=page_prefilter)
         elif ext == ".docx":
             segments = _parse_docx(path)
         elif ext in {".xlsx", ".xlsm"}:
@@ -316,6 +508,8 @@ def strip_running_boilerplate(
 def parse_project_folder(
     folder: str | Path,
     sld_filenames: set[str] | None = None,
+    *,
+    page_prefilter: Optional[Callable[[str], bool]] = None,
 ) -> list[ParsedDocument]:
     """Parse every supported document in a customer submission folder.
 
@@ -324,6 +518,9 @@ def parse_project_folder(
         sld_filenames: Optional set of bare filenames (no path) that should be
             forced to ``"Drawing / SLD"`` doc_type, overriding ``infer_doc_type``.
             Populated from the SLD upload zone on the frontend.
+        page_prefilter: Optional large-PDF page screen (see ``_parse_pdf``). Only
+            engages for PDFs past the page threshold; small/medium files and
+            non-PDF formats are unaffected.
     """
     folder = Path(folder)
     sld_set = {n.lower() for n in (sld_filenames or set())}
@@ -331,7 +528,10 @@ def parse_project_folder(
     for file in sorted(folder.rglob("*")):
         if file.is_file() and file.suffix.lower() in config.SUPPORTED_DOC_EXTENSIONS:
             override = "Drawing / SLD" if file.name.lower() in sld_set else None
-            parsed = parse_document(file, doc_type_override=override)
+            # SLD/drawing PDFs are read by the VLM path, not text — never screen
+            # their pages (would drop the drawing) so only prefilter other PDFs.
+            pf = None if override == "Drawing / SLD" else page_prefilter
+            parsed = parse_document(file, doc_type_override=override, page_prefilter=pf)
             if parsed:
                 docs.append(parsed)
     return docs

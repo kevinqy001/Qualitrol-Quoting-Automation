@@ -124,6 +124,7 @@ def build_sections(step1: dict) -> list[dict]:
                 "document": doc,
                 "page": _page_num(e.get("location", "")),
                 "line": int(e.get("line") or 0),
+                "lineFrac": float(e.get("line_frac") or 0.0),
                 "location": e.get("location", ""),
                 "snippet": e.get("evidence_text", ""),
                 "confidence": float(e.get("confidence") or 0.0),
@@ -235,9 +236,31 @@ def enrich_lines(items: list[dict], search_dirs: list[Path]) -> None:
                     it["line"] = _line_index(page, rects[0])
                     it["hasImage"] = True
                     it["bbox"] = _bbox_fraction(page, rects)
+                    it["imageOnly"] = False
                 else:
                     it["hasImage"] = bool(pdf)  # can still show the full page
                     it["bbox"] = None
+                    # An image / scanned / VLM-OCR'd page: its native text layer
+                    # is header-only, so ``search_for`` can never locate the
+                    # quote. Flag it so the UI highlights the whole content area
+                    # rather than pinning a band to the page header.
+                    try:
+                        native = page.get_text("text") or ""
+                    except Exception:
+                        native = ""
+                    it["imageOnly"] = len(native.strip()) < 200
+                    # For an image page we can still APPROXIMATE the vertical
+                    # position from the OCR text's line order (0..1). Synthesize a
+                    # band there so the highlight lands near the right area
+                    # instead of over the whole page; flagged ``approx`` so the
+                    # UI styles it as an estimate.
+                    frac = it.get("lineFrac") or 0.0
+                    if it["imageOnly"] and 0.0 < frac < 1.0:
+                        band = 0.10
+                        y0 = max(0.05, min(0.90, frac - band / 2))
+                        it["bbox"] = [0.04, round(y0, 4), 0.96,
+                                      round(min(0.97, y0 + band), 4)]
+                        it["approx"] = True
         finally:
             doc.close()
 

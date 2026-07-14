@@ -22,10 +22,77 @@ result rather than crashing the pipeline.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import random
 import re
+import time
 from typing import Optional, Protocol
 
 from . import config
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int((os.getenv(name) or "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float((os.getenv(name) or "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# Transient HTTP statuses worth retrying (rate limit + gateway/overload errors).
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Best-effort classification of a transient (retryable) LLM error.
+
+    Works without importing the anthropic exception classes: rate limits,
+    timeouts, connection resets and 5xx gateway errors are retryable; a 4xx
+    request error (e.g. malformed prompt) is not.
+    """
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if isinstance(status, int):
+        return status in _RETRYABLE_STATUS
+    name = type(exc).__name__.lower()
+    if any(k in name for k in ("timeout", "connection", "ratelimit", "overloaded",
+                               "apistatus", "internalserver", "serviceunavailable")):
+        return True
+    text = str(exc).lower()
+    return any(k in text for k in ("time", "429", "rate limit", "overloaded",
+                                   "temporar", "502", "503", "504"))
+
+
+def _call_with_retries(fn, *, label: str = "llm"):
+    """Call ``fn`` with bounded exponential backoff on transient errors.
+
+    Returns ``fn()``'s result, or re-raises the last exception once retries are
+    exhausted (callers already treat any exception as an empty result). Under a
+    thread-pool fan-out the backoff also self-throttles against Foundry's TPM
+    quota, which is why silent per-chunk timeouts drop so much less often.
+    """
+    max_retries = max(0, _int_env("QUALITROL_LLM_MAX_RETRIES", 2))
+    base = max(0.1, _float_env("QUALITROL_LLM_RETRY_BASE", 2.0))
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - classify then retry or raise
+            if attempt >= max_retries or not _is_retryable_error(exc):
+                raise
+            delay = base * (2 ** attempt) + random.uniform(0, base)
+            logging.warning(
+                "%s transient error (attempt %d/%d): %s; retrying in %.1fs",
+                label, attempt + 1, max_retries, exc, delay,
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 class LLMClient(Protocol):
@@ -132,7 +199,8 @@ class AnthropicFoundryClient:
     def complete(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
         if not self.available:
             return ""
-        try:
+
+        def _create():
             kwargs = {
                 "model": self.deployment,
                 "system": system,
@@ -143,10 +211,17 @@ class AnthropicFoundryClient:
             if self.temperature is not None:
                 kwargs["temperature"] = self.temperature
             try:
-                message = self._client.messages.create(**kwargs)
+                return self._client.messages.create(**kwargs)
             except Exception:
+                if "temperature" not in kwargs:
+                    raise
                 kwargs.pop("temperature", None)
-                message = self._client.messages.create(**kwargs)
+                return self._client.messages.create(**kwargs)
+
+        try:
+            # Bounded exponential backoff on transient (throttle/timeout/5xx)
+            # errors; still fails safe to "" so the caller falls back to rules.
+            message = _call_with_retries(_create, label=self.deployment)
             parts = [
                 block.text
                 for block in message.content
@@ -171,7 +246,8 @@ class AnthropicFoundryClient:
         """Send a text prompt together with a base64-encoded image (vision call)."""
         if not self.available:
             return ""
-        try:
+
+        def _create():
             kwargs: dict = {
                 "model": self.deployment,
                 "system": system,
@@ -196,10 +272,15 @@ class AnthropicFoundryClient:
             if self.temperature is not None:
                 kwargs["temperature"] = self.temperature
             try:
-                message = self._client.messages.create(**kwargs)
+                return self._client.messages.create(**kwargs)
             except Exception:
+                if "temperature" not in kwargs:
+                    raise
                 kwargs.pop("temperature", None)
-                message = self._client.messages.create(**kwargs)
+                return self._client.messages.create(**kwargs)
+
+        try:
+            message = _call_with_retries(_create, label=f"{self.deployment}/vision")
             parts = [
                 block.text
                 for block in message.content

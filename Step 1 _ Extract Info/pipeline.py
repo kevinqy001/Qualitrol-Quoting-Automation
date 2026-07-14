@@ -135,6 +135,7 @@ def extract_evidence(
                         source_document=doc.file_name,
                         location=seg.location,
                         line=text[:idx].count("\n") + 1,
+                        line_frac=_line_frac(text, idx),
                         evidence_text=matching.snippet(text, idx),
                         scenario_id=syn.scenario_id,
                         scenario=scenario.application_scenario if scenario else "",
@@ -172,6 +173,7 @@ def extract_evidence(
                         source_document=doc.file_name,
                         location=seg.location,
                         line=text[:idx].count("\n") + 1,
+                        line_frac=_line_frac(text, idx),
                         evidence_text=matching.snippet(text, idx),
                         scenario_id=scenario.scenario_id,
                         scenario=scenario.application_scenario,
@@ -185,9 +187,28 @@ def extract_evidence(
     return _dedup_evidence(raw_hits)
 
 
+def _evidence_words(text: str) -> set[str]:
+    """Normalized significant-token set for evidence-overlap comparison."""
+    cleaned = "".join(c if c.isalnum() else " " for c in (text or "").lower())
+    return {w for w in cleaned.split() if len(w) > 2}
+
+
+def _evidence_overlap(a: set[str], b: set[str]) -> float:
+    """Overlap ratio (shared tokens / smaller set) of two evidence snippets."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+# Two snippets in the same scenario overlapping this much are the same sentence
+# quoted from a different offset; across scenarios we only merge near-identical
+# rows (the keyword net matching one sentence under several scenarios).
+_EV_SAME_SENTENCE = 0.70
+_EV_CROSS_SCENARIO = 0.85
+
+
 def _dedup_evidence(hits: list[Evidence]) -> list[Evidence]:
-    # Keep the best-confidence hit per (scenario, document, snippet); then cap
-    # the number of evidences per scenario per document to keep output focused.
+    # 1) Keep the best-confidence hit per (scenario, document, snippet prefix).
     best: dict[tuple, Evidence] = {}
     for hit in hits:
         if hit.confidence < config.SETTINGS.thresholds.min_evidence_confidence:
@@ -196,14 +217,50 @@ def _dedup_evidence(hits: list[Evidence]) -> list[Evidence]:
         if key not in best or hit.confidence > best[key].confidence:
             best[key] = hit
 
-    grouped: dict[tuple, list[Evidence]] = {}
-    for ev in best.values():
-        grouped.setdefault((ev.scenario_id, ev.source_document), []).append(ev)
+    survivors = sorted(best.values(), key=lambda e: -e.confidence)
 
-    result: list[Evidence] = []
+    # 2) Merge OVERLAPPING snippets within the same (scenario, document): the same
+    #    sentence quoted from a slightly different offset has a different prefix
+    #    and used to survive step 1 as a separate near-duplicate card.
+    kept_by_scendoc: dict[tuple, list[tuple[set[str], Evidence]]] = {}
+    merged: list[Evidence] = []
+    for ev in survivors:
+        k = (ev.scenario_id, ev.source_document)
+        words = _evidence_words(ev.evidence_text)
+        if any(_evidence_overlap(words, w) >= _EV_SAME_SENTENCE
+               for w, _ in kept_by_scendoc.get(k, [])):
+            continue
+        kept_by_scendoc.setdefault(k, []).append((words, ev))
+        merged.append(ev)
+
+    # 3) Cap the number of evidences per scenario per document (focus).
+    grouped: dict[tuple, list[Evidence]] = {}
+    for ev in merged:
+        grouped.setdefault((ev.scenario_id, ev.source_document), []).append(ev)
+    capped: list[Evidence] = []
     for group in grouped.values():
         group.sort(key=lambda e: e.confidence, reverse=True)
-        result.extend(group[:MAX_EVIDENCE_PER_SCENARIO_PER_DOC])
+        capped.extend(group[:MAX_EVIDENCE_PER_SCENARIO_PER_DOC])
+
+    # 4) Cross-scenario merge: a broad keyword net often matches ONE sentence
+    #    under several scenarios, producing several identical Spec Review cards.
+    #    Collapse near-identical rows in the same document, keeping the highest-
+    #    confidence one (its scenario wins; the shared scenario is spurious cross
+    #    -match noise that grounded mode avoids entirely).
+    capped.sort(key=lambda e: -e.confidence)
+    kept_by_doc: dict[str, list[tuple[set[str], Evidence]]] = {}
+    result: list[Evidence] = []
+    for ev in capped:
+        words = _evidence_words(ev.evidence_text)
+        collapsed = False
+        for w, keep in kept_by_doc.get(ev.source_document, []):
+            if _evidence_overlap(words, w) >= _EV_CROSS_SCENARIO:
+                keep.confidence = round(max(keep.confidence, ev.confidence), 3)
+                collapsed = True
+                break
+        if not collapsed:
+            kept_by_doc.setdefault(ev.source_document, []).append((words, ev))
+            result.append(ev)
 
     result.sort(key=lambda e: (-e.confidence, e.scenario_id))
     for i, ev in enumerate(result, start=1):
@@ -726,13 +783,28 @@ def _locate_quote(quote: str, docs: list[ParsedDocument]):
                     idx = m.start()
                     line = seg.text[:idx].count("\n") + 1
                     return (doc.file_name, seg.location, line,
-                            matching.snippet(seg.text, idx))
+                            matching.snippet(seg.text, idx), idx,
+                            _line_frac(seg.text, idx))
     return None
+
+
+def _line_frac(text: str, idx: int) -> float:
+    """Fractional vertical position (0..1) of ``idx`` within ``text`` by line.
+
+    Used as an APPROXIMATE highlight position for image / OCR pages: the VLM
+    returns page text top-to-bottom, so line-order is a reasonable proxy for
+    vertical position when the exact bbox cannot be found in the PDF text layer.
+    """
+    total = (text or "").count("\n") + 1
+    if total <= 1:
+        return 0.0
+    line0 = text[:idx].count("\n")
+    return round(line0 / (total - 1), 4)
 
 
 def _grounded_extract(
     client, dp: DataPackage, docs: list[ParsedDocument],
-    project_id: str, extra_rules: str,
+    project_id: str, extra_rules: str, stats_out: dict | None = None,
 ):
     """GPT-driven, catalog-grounded Step 1 extraction.
 
@@ -746,7 +818,7 @@ def _grounded_extract(
     Step 1 -> Step 2 contract intact.
     """
     found = llm_extract.locate_requirements_grounded(
-        client, dp, docs, extra_instructions=extra_rules
+        client, dp, docs, extra_instructions=extra_rules, stats_out=stats_out
     )
     if not found:
         return None
@@ -755,14 +827,20 @@ def _grounded_extract(
     ev_counter = 0
     scen_conf: dict[str, float] = {}
     scen_ev: dict[str, list[str]] = {}
-    # A product-identification call and a requirement-extraction call often
-    # cite the SAME sentence for the SAME scenario (e.g. "Class A PQ meters
-    # required per feeder" justifies both the product and its parameter value).
-    # Collapse those into one evidence row, keyed on the located (not raw quote)
-    # position, so the Spec Review modal doesn't show the identical page/line/
-    # snippet twice. A different scenario anchored to the same sentence is kept
-    # as its own row — that sentence genuinely supports two distinct scenarios.
-    located_evidence: dict[tuple[str, str, str, int], Evidence] = {}
+    # A product-identification call and a requirement-extraction call often cite
+    # the SAME sentence for the SAME scenario (e.g. "Class A PQ meters required
+    # per feeder" justifies both the product and its parameter value). Worse, two
+    # requirements frequently quote OVERLAPPING slices of one sentence (starting
+    # a few words apart), which relocate to different offsets and used to escape
+    # an exact (page, line) key — producing several near-identical Spec Review
+    # cards for one sentence. We therefore collapse evidence whose located
+    # positions on the SAME page fall within a small character window (same
+    # region), keeping one row per sentence. A different scenario anchored to the
+    # same sentence is still kept separately (it supports two distinct scenarios).
+    # Maps (sid, src, location) -> list of (idx, Evidence) already placed there.
+    located_evidence: dict[tuple[str, str, str], list[tuple[int, Evidence]]] = {}
+    # Two hits within this many characters are treated as the same sentence.
+    _EVIDENCE_MERGE_WINDOW = 200
 
     def _scenarios_for(fid: str, pid: str) -> list[str]:
         if pid and pid in dp.products and dp.products[pid].applicable_scenarios:
@@ -775,33 +853,39 @@ def _grounded_extract(
         nonlocal ev_counter
         loc = _locate_quote(quote, docs)
         if loc:
-            src, location, line, snippet = loc
+            src, location, line, snippet, idx, line_frac = loc
         else:
-            src, location, line, snippet = "", "LLM (unlocated)", 0, (quote or "")
+            src, location, line, snippet, idx, line_frac = \
+                "", "LLM (unlocated)", 0, (quote or ""), -1, 0.0
         # Only dedupe when the quote was actually located: unlocated quotes all
-        # share the placeholder ("", "LLM (unlocated)", 0) and must never merge
+        # share the placeholder ("", "LLM (unlocated)", -1) and must never merge
         # with each other just because none of them could be pinpointed.
-        dup_key = (sid, src, location, line) if (sid and loc) else None
-        if dup_key and dup_key in located_evidence:
-            existing = located_evidence[dup_key]
-            existing.confidence = round(max(existing.confidence, conf), 3)
-            if note and note not in existing.notes:
-                existing.notes = f"{existing.notes} | {note}".strip(" |")
-            scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
-            return existing.evidence_id
+        region_key = (sid, src, location) if (sid and loc) else None
+        if region_key is not None:
+            for placed_idx, existing in located_evidence.get(region_key, []):
+                if abs(placed_idx - idx) <= _EVIDENCE_MERGE_WINDOW:
+                    existing.confidence = round(max(existing.confidence, conf), 3)
+                    # Keep the longer snippet (more context for the reviewer).
+                    if len(snippet or "") > len(existing.evidence_text or ""):
+                        existing.evidence_text = snippet or existing.evidence_text
+                    if note and note not in existing.notes:
+                        existing.notes = f"{existing.notes} | {note}".strip(" |")
+                    scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
+                    return existing.evidence_id
         ev_counter += 1
         eid = f"EVD-{ev_counter:04d}"
         scen = dp.scenarios.get(sid)
         new_evidence = Evidence(
             evidence_id=eid, project_id=project_id, source_document=src,
-            location=location, line=line, evidence_text=snippet or (quote or ""),
+            location=location, line=line, line_frac=line_frac,
+            evidence_text=snippet or (quote or ""),
             scenario_id=sid, scenario=scen.application_scenario if scen else "",
             asset_type=scen.asset_type if scen else "", asset_tag="",
             confidence=round(conf, 3), notes=note,
         )
         evidence.append(new_evidence)
-        if dup_key:
-            located_evidence[dup_key] = new_evidence
+        if region_key is not None:
+            located_evidence.setdefault(region_key, []).append((idx, new_evidence))
         if sid:
             scen_conf[sid] = max(scen_conf.get(sid, 0.0), conf)
             scen_ev.setdefault(sid, []).append(eid)
@@ -899,12 +983,6 @@ def run(
     output_dir = Path(output_dir) if output_dir else config.OUTPUT_DIR / project_id
 
     dp = load_data_package()
-    docs = parse_project_folder(project_dir, sld_filenames=sld_filenames)
-
-    # Drop running headers/footers (letterhead, tender/document number, footer
-    # column titles) that repeat on most pages. They are not requirements and
-    # otherwise pollute keyword evidence snippets and grounded chunks alike.
-    stripped_boilerplate = strip_running_boilerplate(docs)
 
     # Judge client (Claude) for the keyword-mode augmentation + context directives;
     # analyze client (project GPT) for the grounded requirement/product locator.
@@ -921,6 +999,28 @@ def run(
         requested_mode = mode_env
     else:
         requested_mode = "grounded" if analyze_client.available else "keyword"
+
+    # Large-PDF page prefilter (memory lever): for a very large PDF, keep only
+    # controlled-term pages (+ neighbours) at parse time so a 2000+ page
+    # reference standard never loads its whole body into memory. Only engages
+    # past a page threshold (see document_parser) and only in grounded mode,
+    # where the model reads selected regions anyway; keyword mode needs the full
+    # corpus so it is left untouched. Disable with QUALITROL_PARSE_PREFILTER=0.
+    page_prefilter = None
+    if (
+        requested_mode == "grounded"
+        and os.getenv("QUALITROL_PARSE_PREFILTER", "1") != "0"
+    ):
+        page_prefilter = llm_extract.make_page_prefilter(dp)
+
+    docs = parse_project_folder(
+        project_dir, sld_filenames=sld_filenames, page_prefilter=page_prefilter
+    )
+
+    # Drop running headers/footers (letterhead, tender/document number, footer
+    # column titles) that repeat on most pages. They are not requirements and
+    # otherwise pollute keyword evidence snippets and grounded chunks alike.
+    stripped_boilerplate = strip_running_boilerplate(docs)
 
     # --- P1-A: recover image-only requirement pages in mixed PDFs, and when a
     #     project supplies only drawings, read their monitoring labels. Injected
@@ -945,11 +1045,15 @@ def run(
     llm_dropped: list[dict] = []
     used_mode = "keyword"
     identified_products: list[dict] = []
+    grounded_stats: dict = {}
 
     # --- Grounded mode: GPT locates requirements/products from the family/model
     #     catalog; scenarios are derived structurally (no keyword matching). ---
     if requested_mode == "grounded" and analyze_client.available:
-        grounded = _grounded_extract(analyze_client, dp, docs, project_id, extra_rules)
+        grounded = _grounded_extract(
+            analyze_client, dp, docs, project_id, extra_rules,
+            stats_out=grounded_stats,
+        )
         if grounded:
             detected, evidence, requirements, identified_products = grounded
             used_mode = "grounded"
@@ -1009,6 +1113,10 @@ def run(
             "sld_text_augmented_docs": image_text_augmented,
             "image_text_augmented_pages": image_text_augmented,
             "running_boilerplate_lines_removed": stripped_boilerplate,
+            # Grounded map-reduce coverage: prefilter mode, chunk count and how
+            # many chunks came back empty (throttle/timeout). Non-zero
+            # ``chunks_failed`` means the extraction is partial — surface it.
+            "grounded_stats": grounded_stats,
         },
         "user_context": (context_notes or "").strip(),
         "context_directives": context_directives,

@@ -162,6 +162,11 @@ class Evidence:
     # (0 = unknown). Additive field used by the Spec Sections review UI to cite
     # a precise "page N line M" location; does not affect BOQ generation.
     line: int = 0
+    # Fractional vertical position (0..1) of the match within its page/segment
+    # text = line / total_lines. Used only as an APPROXIMATE highlight position
+    # for image / OCR pages, where the exact bbox cannot be located in the PDF
+    # text layer. 0 = unknown. Does not affect BOQ generation.
+    line_frac: float = 0.0
     evidence_text: str = ""
     scenario_id: str = ""
     scenario: str = ""

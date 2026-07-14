@@ -2145,6 +2145,22 @@
       0%, 100% { background: rgb(255 179 71 / 0.12); box-shadow: 0 0 0 0 rgb(237 84 29 / 0); }
       50%      { background: rgb(255 179 71 / 0.44); box-shadow: 0 0 12px 2px rgb(237 84 29 / 0.38); }
     }
+    /* Whole-page highlight for image/OCR pages where the exact line is unknown:
+       a softer, larger tint (no hard box) so it reads as "source is on this page". */
+    .spec-highlight-page {
+      border-radius:8px;
+      background: rgb(255 179 71 / 0.14);
+      animation: specPagePulse 1.6s ease-in-out infinite;
+    }
+    @keyframes specPagePulse {
+      0%, 100% { background: rgb(255 179 71 / 0.08); box-shadow: inset 0 0 0 1px rgb(237 84 29 / 0.10); }
+      50%      { background: rgb(255 179 71 / 0.22); box-shadow: inset 0 0 0 1px rgb(237 84 29 / 0.22); }
+    }
+    /* Approximate band (image page, position estimated from OCR line order):
+       a dashed outline signals "near here, not exact". */
+    .spec-highlight-approx {
+      outline:2px dashed rgb(237 84 29 / 0.55); outline-offset:-1px;
+    }
 
     .spec-right {
       flex: 1 1 42%; min-width:0; display:flex; flex-direction:column;
@@ -2173,11 +2189,20 @@
       min-width:0; flex:1 1 auto; display:flex; flex-direction:column;
       cursor:pointer;
     }
-    /* Title: single line, capped to the column width, ellipsis past it. */
+    /* Title row: document name (shrinks, ellipsis) + "Page N · Line M" (never
+       shrinks). Keeping them as separate elements guarantees the page/line stays
+       visible even when the document filename is very long. */
+    .spec-loc-titlerow {
+      display:flex; align-items:baseline; gap:6px; min-width:0; max-width:100%;
+    }
     .spec-loc-title {
-      display:block; max-width:100%;
+      flex:0 1 auto; min-width:0;
       font-size:13.5px; font-weight:750; color:var(--ink);
       overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .spec-loc-meta {
+      flex:0 0 auto; white-space:nowrap;
+      font-size:12px; font-weight:700; color:var(--muted);
     }
     /* Summary: always below the title, fixed to at most two lines, clipped. */
     .spec-loc-sub {
@@ -2216,6 +2241,7 @@
     .spec-loc-restore:hover { background:#eefaf2; border-color:#bfe6ce; }
     .spec-loc-item.spec-loc-deleted { opacity:.6; background:#fbf7f4; }
     .spec-loc-item.spec-loc-deleted .spec-loc-title,
+    .spec-loc-item.spec-loc-deleted .spec-loc-meta,
     .spec-loc-item.spec-loc-deleted .spec-loc-sub { text-decoration:line-through; color:var(--muted); }
     .spec-doc-empty { text-align:center; color:var(--muted); padding:40px 16px; font-size:13px; }
     @media (max-width: 900px){

@@ -882,12 +882,23 @@
       `?doc=${encodeURIComponent(docName)}&page=${pageNo}&zoom=2`;
   }
 
-  function specLocTitle(it, multiDoc) {
-    const parts = [];
-    if (multiDoc && it.document) parts.push(it.document);
-    parts.push(`Page ${it.page || "?"}`);
+  // Document name shown as the (truncatable) card title; empty for single-doc
+  // reviews where the doc name is redundant.
+  function specLocDocName(it, multiDoc) {
+    return multiDoc && it.document ? it.document : "";
+  }
+  // "Page N · Line M" — rendered in its own non-shrinking element so a long
+  // document name can never squeeze it out of view.
+  function specLocMeta(it) {
+    const parts = [`Page ${it.page || "?"}`];
     if (it.line) parts.push(`Line ${it.line}`);
     return parts.join(" · ");
+  }
+  // Flat, single-string label (document · page · line) for plain-text contexts
+  // such as the feedback payload and the feedback modal heading.
+  function specLocLabel(it, multiDoc) {
+    const name = specLocDocName(it, multiDoc);
+    return name ? `${name} · ${specLocMeta(it)}` : specLocMeta(it);
   }
 
   function renderSpecLocations() {
@@ -916,9 +927,13 @@
           : `<button type="button" class="spec-fb-btn${upCls}" data-act="up" data-idx="${idx}" title="Looks right" aria-label="Thumbs up">👍</button>
              <button type="button" class="spec-fb-btn${downCls}" data-act="down" data-idx="${idx}" title="Not right — tell us why" aria-label="Thumbs down">👎</button>
              <button type="button" class="spec-del-btn" data-act="delete" data-idx="${idx}" title="Delete this requirement" aria-label="Delete">🗑</button>`;
+        const docName = specLocDocName(it, multiDoc);
         return `<div class="spec-loc-item${it.deleted ? " spec-loc-deleted" : ""}" data-idx="${idx}">
           <span class="spec-loc-main" data-act="jump" data-idx="${idx}">
-            <span class="spec-loc-title">${escapeHtml(specLocTitle(it, multiDoc))}</span>
+            <span class="spec-loc-titlerow">
+              ${docName ? `<span class="spec-loc-title">${escapeHtml(docName)}</span>` : ""}
+              <span class="spec-loc-meta">${escapeHtml(specLocMeta(it))}</span>
+            </span>
             ${snip ? `<span class="spec-loc-sub">${escapeHtml(snip)}${it.snippet && it.snippet.length > 110 ? "…" : ""}</span>` : ""}
           </span>
           <span class="spec-loc-side">
@@ -981,20 +996,40 @@
     const bbox = it.bbox;
     const hl = document.createElement("div");
     hl.className = "spec-highlight";
+    const foot = $("#spec-foot-status");
     if (bbox && bbox.length === 4) {
-      const pad = 0.006; // small vertical padding around the line
+      // A located bbox (exact) OR an approximate band synthesised from the OCR
+      // text's line position on an image page (it.approx). The approximate band
+      // gets extra padding and a softer, dashed style so it doesn't read as a
+      // precise match.
+      const pad = it.approx ? 0.015 : 0.006;
       const top = Math.max(0, bbox[1] - pad);
       const bottom = Math.min(1, bbox[3] + pad);
       hl.style.left = "2.5%";
       hl.style.width = "95%";
       hl.style.top = `${top * 100}%`;
-      hl.style.height = `${Math.max(0.014, bottom - top) * 100}%`;
+      hl.style.height = `${Math.max(it.approx ? 0.05 : 0.014, bottom - top) * 100}%`;
+      if (it.approx) hl.classList.add("spec-highlight-approx");
+      if (foot) {
+        foot.textContent = it.approx
+          ? "This page is image-based (text recovered via OCR); the highlight is " +
+            "an approximate position estimated from the text's line order."
+          : "";
+      }
     } else {
-      // No precise region located: pulse a band near the top of the page.
+      // No line info at all: image page we couldn't even estimate. Highlight the
+      // whole content area (below the header) instead of pinning a tiny band to
+      // the letterhead, and say so.
+      hl.className = "spec-highlight spec-highlight-page";
       hl.style.left = "2.5%";
-      hl.style.top = "2%";
+      hl.style.top = "8%";
       hl.style.width = "95%";
-      hl.style.height = "4%";
+      hl.style.height = "86%";
+      if (foot && it.imageOnly) {
+        foot.textContent =
+          "This page is image-based (text recovered via OCR), so the exact line " +
+          "can't be pinpointed — the whole page is highlighted.";
+      }
     }
     pageEl.appendChild(hl);
   }
@@ -1014,7 +1049,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           requirementId: it.id,
-          location: specLocTitle(it, true),
+          location: specLocLabel(it, true),
           feedback,
           comments: comments || "",
         }),
@@ -1031,7 +1066,7 @@
     const ta = $("#spec-fb-comment");
     if (ta) ta.value = (it && it.comments) || "";
     const target = $("#spec-fb-target");
-    if (target) target.textContent = it ? `Item: ${specLocTitle(it, true)}` : "";
+    if (target) target.textContent = it ? `Item: ${specLocLabel(it, true)}` : "";
     const m = $("#spec-fb-modal");
     if (m) m.classList.remove("hidden");
     setTimeout(() => ta && ta.focus(), 40);

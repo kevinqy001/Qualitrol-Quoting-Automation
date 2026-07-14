@@ -475,10 +475,24 @@ def _pdf_pages_requiring_vision(
         for page_number, text in native.items()
         if "[VLM OCR of embedded image]" in text
     }
+    # Bound the per-page geometry scan so a 2000+ page PDF cannot spend minutes
+    # (and spike memory) walking every page's image rects. 0 disables the cap.
+    try:
+        scan_cap = max(0, int(os.getenv("QUALITROL_VLM_SCAN_MAX_PAGES", "400")))
+    except ValueError:
+        scan_cap = 400
     candidates: list[int] = []
     try:
         pdf = fitz.open(doc.file_path)
+        if scan_cap and pdf.page_count > scan_cap:
+            logging.warning(
+                "VLM page scan capped at first %d/%d pages for %s; set "
+                "QUALITROL_VLM_SCAN_MAX_PAGES=0 to scan all",
+                scan_cap, pdf.page_count, doc.file_name,
+            )
         for page_index, page in enumerate(pdf):
+            if scan_cap and page_index >= scan_cap:
+                break
             if page_index + 1 in already_ocr:
                 continue
             page_area = page.rect.width * page.rect.height

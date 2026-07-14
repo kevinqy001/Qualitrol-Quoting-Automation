@@ -20,7 +20,7 @@ import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 from . import matching
 from .document_parser import ParsedDocument
@@ -250,6 +250,36 @@ def _segment_is_anchor(text: str, terms: list[str]) -> bool:
     return False
 
 
+def make_page_prefilter(dp) -> Callable[[str], bool]:
+    """Build a page-level screen (controlled-term net) for the parse layer.
+
+    Returns a callable ``keep(text) -> bool`` used by ``document_parser`` to
+    retain only pages that carry a distinctive catalog term (or recovered VLM
+    OCR) when a document is very large. Same vocabulary as the grounded
+    anchored prefilter, so selection is consistent across the two layers.
+    """
+    terms = _anchor_terms(dp)
+
+    def _keep(text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        if "[VLM OCR of embedded image]" in text:
+            return True
+        return _segment_is_anchor(text, terms)
+
+    return _keep
+
+
+def _chunk_anchor_score(chunk: str, terms: list[str]) -> int:
+    """Count distinct anchor terms present in a chunk (region relevance score)."""
+    low = chunk.lower()
+    score = 0
+    for term in terms:
+        if _find_anchor_term(low, term) >= 0:
+            score += 1
+    return score
+
+
 def _merge_intervals(idxs: list[int], radius: int, n: int) -> list[tuple[int, int]]:
     """Expand each anchor index by +/- ``radius`` segments and merge overlaps."""
     if not idxs:
@@ -399,6 +429,12 @@ def _parse_grounded_response(data: dict, dp) -> tuple[list[dict], list[dict]]:
             mid = ""
         if not fid and not pid and not mid:
             continue
+        # Mirror the products filter: an explicit self-check the model must make
+        # per requirement, not just once per product. Catches borderline items
+        # (plant/civil/commercial text that happens to name a valid metric) that
+        # the "be precise, not exhaustive" prose rule alone did not exclude.
+        if item.get("in_scope") is False:
+            continue
         rtype = str(item.get("requirement_type", "")).strip()
         if rtype not in _VALID_REQ_TYPES:
             rtype = "Reference"
@@ -447,6 +483,7 @@ def _merge_grounded(
 def locate_requirements_grounded(
     client, dp, docs: list[ParsedDocument],
     extra_instructions: str = "", chunk_chars: int = 40000,
+    stats_out: Optional[dict] = None,
 ) -> Optional[dict]:
     """LLM-driven, catalog-grounded requirement & product locator (Step 1).
 
@@ -483,6 +520,17 @@ def locate_requirements_grounded(
         len(d.full_text) for d in docs if d.doc_type != "Drawing / SLD"
     )
     min_chars = _int_env("QUALITROL_GROUNDED_MIN_CHARS", 80000)
+    # A "huge" tender (e.g. a 2000+ page reference standard) must never fall back
+    # to reading the whole body: that produces 100+ LLM calls that throttle,
+    # time out and blow the job's wall-clock / memory budget. Past this prose
+    # size we force the anchored prefilter (regardless of coverage) and hard-cap
+    # the number of chunks, trading a little recall for a job that completes.
+    huge_chars = _int_env("QUALITROL_GROUNDED_HUGE_CHARS", 1_200_000)
+    is_huge = prose_chars > huge_chars
+    if is_huge:
+        chunk_chars = _int_env("QUALITROL_GROUNDED_HUGE_CHUNK_CHARS", 80000)
+    stats_meta = {"mode": "full", "prose_chars": prose_chars, "coverage": 1.0,
+                  "is_huge": is_huge, "capped": False}
     chunks: list[str] = []
     if os.getenv("QUALITROL_GROUNDED_ANCHORED", "1") != "0" and prose_chars > min_chars:
         raw_ctx = (os.getenv("QUALITROL_GROUNDED_CONTEXT") or "").strip()
@@ -492,14 +540,19 @@ def locate_requirements_grounded(
         )
         total = stats["total_chars"] or 1
         coverage = stats["selected_chars"] / total
-        if a_chunks and coverage <= 0.80:
+        stats_meta["coverage"] = round(coverage, 3)
+        # Normally the coverage guard reverts to full-read when the net keeps
+        # nearly everything (recall safety); for a huge doc we keep the anchored
+        # selection anyway (survival over the marginal recall of dead weight).
+        if a_chunks and (coverage <= 0.80 or is_huge):
             chunks = a_chunks
+            stats_meta["mode"] = "anchored"
             logging.info(
                 "grounded prefilter=anchored: %d/%d segments, %d/%d chars "
-                "(%.0f%% kept), %d LLM chunks",
+                "(%.0f%% kept), %d LLM chunks%s",
                 stats["selected_segments"], stats["total_segments"],
                 stats["selected_chars"], stats["total_chars"], coverage * 100,
-                len(a_chunks),
+                len(a_chunks), " [huge: forced]" if is_huge else "",
             )
         else:
             logging.info(
@@ -511,6 +564,23 @@ def locate_requirements_grounded(
         chunks = _grounded_chunks(docs, chunk_chars=chunk_chars)
     if not chunks:
         return None
+
+    # Hard cap on the number of LLM calls so an enormous tender cannot spawn an
+    # unbounded fan-out. When exceeded, keep the most requirement-dense chunks
+    # (ranked by how many distinct controlled terms they carry). 0 disables.
+    max_chunks = _int_env("QUALITROL_GROUNDED_MAX_CHUNKS", 40)
+    if max_chunks > 0 and len(chunks) > max_chunks:
+        terms = _anchor_terms(dp)
+        ranked = sorted(
+            chunks, key=lambda c: _chunk_anchor_score(c, terms), reverse=True
+        )
+        chunks = ranked[:max_chunks]
+        stats_meta["capped"] = True
+        logging.info(
+            "grounded chunks capped to %d most requirement-dense (of %d); "
+            "raise QUALITROL_GROUNDED_MAX_CHUNKS to lift",
+            max_chunks, len(ranked),
+        )
 
     system = (
         "You are a senior Qualitrol application engineer doing quotation take-off. "
@@ -541,6 +611,13 @@ def locate_requirements_grounded(
         "- A component of the plant being monitored (e.g. a breaker/CT/VT that is "
         "part of the GIS) is NOT itself a monitoring product unless the customer "
         "asks to MONITOR it.\n"
+        "- For EVERY requirement, explicitly self-check and set in_scope=true only if "
+        "the value/parameter genuinely belongs to a Qualitrol monitoring deliverable "
+        "in THIS project (same bar as the product rule above). Set in_scope=false for "
+        "requirements about the plant/asset itself (not the monitoring system), "
+        "civil/electrical/mechanical works, commercial/warranty/service terms, or "
+        "anything out-of-scope/future/optional/supplied-by-others — do not include "
+        "those at all.\n"
         "Respond with STRICT JSON only."
     )
     system = _with_extra_rules(system, extra_instructions)
@@ -559,7 +636,8 @@ def locate_requirements_grounded(
         '"confidence":0.0,"evidence_quote":"","rationale":"one sentence"}],'
         '"requirements":[{"family_id":"","product_id":"","metric_id":"","value":"",'
         '"unit":"","requirement_type":"Must-have|Preferred|Reference|Quantity Basis",'
-        '"evidence_quote":"","confidence":0.0,"rationale":"one sentence"}]}'
+        '"in_scope":true,"evidence_quote":"","confidence":0.0,'
+        '"rationale":"one sentence"}]}'
     )
 
     total_chunks = len(chunks)
@@ -576,6 +654,9 @@ def locate_requirements_grounded(
             data = client.complete_json(system, user, max_tokens=8192)
         except Exception:  # noqa: BLE001 - fail safe: skip this chunk, keep others
             return None
+        # An empty string from the client (transient error / timeout after the
+        # client's own retries) parses to None; treat that as a failed chunk so
+        # the caller can surface partial-coverage instead of a silent gap.
         return data if isinstance(data, dict) else None
 
     # Chunks are independent, so fan them out concurrently (the Responses client
@@ -591,12 +672,27 @@ def locate_requirements_grounded(
 
     all_products: list[dict] = []
     all_reqs: list[dict] = []
+    failed = 0
     for data in responses:
         if not data:
+            failed += 1
             continue
         prods, reqs = _parse_grounded_response(data, dp)
         all_products.extend(prods)
         all_reqs.extend(reqs)
+
+    if failed:
+        logging.warning(
+            "grounded locator: %d/%d chunks returned nothing (throttle/timeout);"
+            " results may be partial", failed, total_chunks,
+        )
+    if stats_out is not None:
+        stats_meta.update({
+            "chunks_total": total_chunks,
+            "chunks_failed": failed,
+            "chunk_chars": chunk_chars,
+        })
+        stats_out.update(stats_meta)
 
     merged_products, merged_reqs = _merge_grounded(all_products, all_reqs)
     if not merged_products and not merged_reqs:

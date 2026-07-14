@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import os
 import re
 import sys
 import time
@@ -167,7 +168,12 @@ def _now() -> str:
 # treated as dead (the worker running it likely restarted/redeployed). The poll
 # and resume endpoints then return a clear "stale" status instead of letting the
 # client poll forever. In-flight work is not resumed across workers by design.
-STALE_JOB_SECONDS = 30 * 60
+# Configurable so very large tenders (which legitimately take longer) are not
+# prematurely declared dead: QUALITROL_STALE_JOB_SECONDS (default 30 min).
+try:
+    STALE_JOB_SECONDS = max(60, int(os.getenv("QUALITROL_STALE_JOB_SECONDS", "") or 30 * 60))
+except ValueError:
+    STALE_JOB_SECONDS = 30 * 60
 
 # Generated quotation docs live at a deterministic path derived from this id, so
 # any worker can serve a download by path alone (no shared in-memory index).
@@ -1709,6 +1715,25 @@ async def get_requirement_feedback(case_id: str):
     safe = "".join(c for c in case_id if c.isalnum() or c in ("-", "_"))
     items = _load_requirements_feedback(safe)
     return {"exists": bool(items), "caseId": safe, "items": items}
+
+
+@app.get("/api/v1/feedback/digest")
+async def feedback_digest_endpoint(write: bool = False):
+    """Aggregate ALL user feedback (across cases) into a read-only digest.
+
+    Manual trigger for the feedback -> optimization loop: returns aggregated
+    stats + a Markdown report an engineer can use to tune
+    ``extraction_rules.md`` and the BOQ logic. Pass ``?write=true`` to also save
+    it to ``OUTPUT_DIR/_feedback/feedback_digest.md``. Read-only; never mutates
+    feedback or case data.
+    """
+    from qualitrol_core import feedback_digest as _fd
+
+    stats, markdown = await asyncio.to_thread(_fd.build_digest)
+    saved = None
+    if write:
+        saved = str(await asyncio.to_thread(_fd.write_digest, markdown))
+    return {"stats": stats, "markdown": markdown, "savedTo": saved}
 
 
 # --------------------------------------------------------------------------- #

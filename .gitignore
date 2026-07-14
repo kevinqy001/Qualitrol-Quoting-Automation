@@ -20,3 +20,7 @@ backups/
 *.backup-*.xlsx
 *.premerge_*.xlsx
 *_BACKUP_*.xlsx
+
+# Generated/ad-hoc KB export + its generator - regenerate locally, do not commit
+Qualitrol_BOQ_Matching_Data_Package.md
+scripts/_xlsx_to_md.py
